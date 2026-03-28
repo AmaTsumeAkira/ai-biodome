@@ -28,8 +28,27 @@ jobs:
       - name: Build
         run: pio run
 
-      - name: Upload artifact
+      - name: List build output
+        run: find .pio/build -type f -name "*.bin" -o -name "*.elf" -o -name "*.map" | head -20
+
+      - name: Merge firmware (bootloader + app + partition)
+        run: |
+          pio run -t mergebin
+          ls -lh .pio/build/esp32-s3-n16r8/*.bin
+
+      - name: Upload firmware (.bin)
         uses: actions/upload-artifact@v4
         with:
-          name: firmware
-          path: .pio/build/esp32-s3/*.bin
+          name: ai-biodome-firmware
+          path: |
+            .pio/build/esp32-s3-n16r8/firmware.bin
+            .pio/build/esp32-s3-n16r8/bootloader.bin
+            .pio/build/esp32-s3-n16r8/partitions.bin
+          if-no-files-found: warn
+
+      - name: Upload merged firmware (single .bin)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-biodome-merged
+          path: .pio/build/esp32-s3-n16r8/firmware.merged.bin
+          if-no-files-found: warn
