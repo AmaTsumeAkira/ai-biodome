@@ -126,6 +126,41 @@ const char index_html[] PROGMEM = R"rawliteral(
       </div>
     </div>
 
+    <!-- 传感器在线状态 -->
+    <div class="bg-white rounded-2xl shadow-sm p-6">
+      <h2 class="text-xl font-bold text-gray-800 mb-4 border-b pb-3">📡 传感器在线状态</h2>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div class="flex items-center gap-3 p-3 rounded-lg bg-slate-50">
+          <span id="dot-sht40" class="status-dot status-disconnected"></span>
+          <div>
+            <div class="font-semibold text-sm">SHT40</div>
+            <div class="text-xs text-gray-500">温湿度</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-3 p-3 rounded-lg bg-slate-50">
+          <span id="dot-bh1750" class="status-dot status-disconnected"></span>
+          <div>
+            <div class="font-semibold text-sm">BH1750</div>
+            <div class="text-xs text-gray-500">光照</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-3 p-3 rounded-lg bg-slate-50">
+          <span id="dot-sgp30" class="status-dot status-disconnected"></span>
+          <div>
+            <div class="font-semibold text-sm">SGP30</div>
+            <div class="text-xs text-gray-500">空气质量</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-3 p-3 rounded-lg bg-slate-50">
+          <span id="dot-soil" class="status-dot status-disconnected"></span>
+          <div>
+            <div class="font-semibold text-sm">土壤</div>
+            <div class="text-xs text-gray-500">湿度ADC</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 设备控制面板 -->
     <div class="bg-white rounded-2xl shadow-sm p-6">
       <div class="flex items-center justify-between mb-6 border-b pb-4">
@@ -473,6 +508,18 @@ const char index_html[] PROGMEM = R"rawliteral(
           if (data.system.cpu_cores) document.getElementById('val-cpu-cores').innerText  = data.system.cpu_cores + ' 核';
           if (data.system.uptime !== undefined) document.getElementById('val-uptime').innerText = formatUptime(data.system.uptime);
           if (data.system.sdk_ver)   document.getElementById('val-sdk').innerText        = data.system.sdk_ver;
+        }
+
+        // 传感器在线状态
+        if (data.sensors) {
+          var updateDot = function(id, online) {
+            var el = document.getElementById(id);
+            el.className = 'status-dot ' + (online ? 'status-connected' : 'status-disconnected');
+          };
+          updateDot('dot-sht40', data.sensors.sht40);
+          updateDot('dot-bh1750', data.sensors.bh1750);
+          updateDot('dot-sgp30', data.sensors.sgp30);
+          updateDot('dot-soil', data.sensors.soil);
         }
 
         if (data.history && data.history.time && data.history.time.length > 0) {

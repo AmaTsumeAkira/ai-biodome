@@ -42,7 +42,13 @@ Adafruit_SGP30 sgp; // 👇 新增 SGP30 对象
 // --- 环境数据变量 ---
 float temp = 0.0, hum = 0.0, lux = 0.0;
 int soilPercent = 0;
-uint16_t eco2 = 400, tvoc = 0; // 👇 新增空气质量变量 (默认400和0)
+uint16_t eco2 = 400, tvoc = 0;
+
+// --- 传感器在线状态 ---
+bool sensor_bh1750_ok = false;
+bool sensor_sht40_ok = false;
+bool sensor_sgp30_ok = false;
+bool has_psram = false;
 
 // --- 硬件控制状态变量 ---
 bool autoMode = true;
@@ -89,8 +95,11 @@ void readSHT40() {
       uint16_t h_ticks = (Wire.read() << 8) | Wire.read(); Wire.read();
       temp = -45.0 + (175.0 * t_ticks / 65535.0);
       hum = -6.0 + (125.0 * h_ticks / 65535.0);
+      sensor_sht40_ok = true;
+      return;
     }
   }
+  sensor_sht40_ok = false;
 }
 
 void updateRelays() {
@@ -199,8 +208,8 @@ String buildJson() {
   s_obj["light_end"] = sched.light_end;
 
   JsonObject system = doc.createNestedObject("system");
-  system["heap_total"] = ESP.getHeapSize();
-  system["heap_free"] = ESP.getFreeHeap();
+  system["heap_total"] = has_psram ? ESP.getPsramSize() : ESP.getHeapSize();
+  system["heap_free"] = has_psram ? ESP.getFreePsram() : ESP.getFreeHeap();
   system["chip_rev"] = ESP.getChipRevision();
   system["cpu_cores"] = ESP.getChipCores();
   system["mac"] = WiFi.macAddress();
@@ -209,6 +218,14 @@ String buildJson() {
   system["ip"]        = WiFi.localIP().toString();
   system["cpu_freq"]  = ESP.getCpuFreqMHz();
   system["uptime"]    = (uint32_t)(millis() / 1000);
+  system["psram"]     = has_psram;
+
+  // 传感器在线状态
+  JsonObject sensors_status = doc.createNestedObject("sensors");
+  sensors_status["bh1750"] = sensor_bh1750_ok;
+  sensors_status["sht40"]  = sensor_sht40_ok;
+  sensors_status["sgp30"]  = sensor_sgp30_ok;
+  sensors_status["soil"]   = true;  // ADC 总是可用
 
   JsonObject history = doc.createNestedObject("history");
   JsonArray t_arr = history.createNestedArray("time");
@@ -346,16 +363,35 @@ void setup() {
   pixel.setBrightness(50);
   setLED(0, 0, 0);
 
-  // 初始化总线和现有传感器
+  // 检查 PSRAM
+  has_psram = psramFound();
+  if (has_psram) {
+    Serial.println("✅ PSRAM 可用");
+  } else {
+    Serial.println("⚠️ PSRAM 不可用，使用内部 SRAM");
+  }
+
+  // 初始化总线和传感器（全部带保护）
   Wire.begin(SDA_PIN, SCL_PIN);
-  lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE);
+
+  // BH1750 光照传感器
+  if (lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE)) {
+    sensor_bh1750_ok = true;
+    Serial.println("✅ BH1750 初始化成功");
+  } else {
+    sensor_bh1750_ok = false;
+    Serial.println("⚠️ BH1750 未连接，光照数据将不可用");
+  }
+
   pinMode(SOIL_PIN, INPUT);
 
-  // 👇 初始化 SGP30 传感器
-  if (!sgp.begin()) {
-    Serial.println("❌ 警告: 找不到 SGP30 传感器");
-  } else {
+  // SGP30 空气质量传感器
+  if (sgp.begin()) {
+    sensor_sgp30_ok = true;
     Serial.println("✅ SGP30 传感器初始化成功");
+  } else {
+    sensor_sgp30_ok = false;
+    Serial.println("⚠️ SGP30 未连接，空气质量数据将不可用");
   }
 
   // 加载调度配置
@@ -413,9 +449,9 @@ void loop() {
   if (WiFi.status() == WL_CONNECTED) {
     webSocket.loop(); 
 
-    // 👇 SGP30 要求每 1 秒读取一次以保持内部校准算法稳定
+    // SGP30 要求每 1 秒读取一次以保持内部校准算法稳定
     static unsigned long lastSGP = 0;
-    if (millis() - lastSGP > 1000) {
+    if (sensor_sgp30_ok && millis() - lastSGP > 1000) {
       lastSGP = millis();
       if (sgp.IAQmeasure()) {
         eco2 = sgp.eCO2;
@@ -428,7 +464,7 @@ void loop() {
       lastUpdate = millis();
       
       readSHT40();
-      lux = lightMeter.readLightLevel();
+      lux = sensor_bh1750_ok ? lightMeter.readLightLevel() : 0.0;
       int rawSoil = analogRead(SOIL_PIN);
       soilPercent = constrain(map(rawSoil, SOIL_AIR_VAL, SOIL_WATER_VAL, 0, 100), 0, 100);
 
@@ -438,8 +474,15 @@ void loop() {
       String broadcastStr = buildJson();
       webSocket.broadcastTXT(broadcastStr);
 
-      if (soilPercent < 20 || temp > 35 || eco2 > 1500) setLED(255, 0, 0); 
-      else setLED(0, 255, 0); 
+      // LED 状态指示
+      bool allOffline = !sensor_bh1750_ok && !sensor_sht40_ok && !sensor_sgp30_ok;
+      if (allOffline) {
+        setLED(255, 180, 0);  // 黄色 = 空板/无传感器
+      } else if (soilPercent < 20 || temp > 35 || eco2 > 1500) {
+        setLED(255, 0, 0);    // 红色 = 告警
+      } else {
+        setLED(0, 255, 0);    // 绿色 = 正常
+      } 
     }
   }
 }
