@@ -36,6 +36,7 @@ jobs:
 
       - name: Merge firmware (esptool)
         run: |
+          pip install esptool
           python -m esptool --chip esp32s3 merge_bin \
             -o .pio/build/esp32-s3-n16r8/firmware-merged.bin \
             --flash_mode dio \
