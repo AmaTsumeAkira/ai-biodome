@@ -31,12 +31,22 @@ jobs:
       - name: List build output
         run: find .pio/build -type f -name "*.bin" -o -name "*.elf" -o -name "*.map" | head -20
 
-      - name: Merge firmware (bootloader + app + partition)
-        run: |
-          pio run -t mergebin
-          ls -lh .pio/build/esp32-s3-n16r8/*.bin
+      - name: List build output
+        run: find .pio/build -type f \( -name "*.bin" -o -name "*.elf" \) -exec ls -lh {} \;
 
-      - name: Upload firmware (.bin)
+      - name: Merge firmware (esptool)
+        run: |
+          python -m esptool --chip esp32s3 merge_bin \
+            -o .pio/build/esp32-s3-n16r8/firmware-merged.bin \
+            --flash_mode dio \
+            --flash_freq 80m \
+            --flash_size 16MB \
+            0x0 .pio/build/esp32-s3-n16r8/bootloader.bin \
+            0x8000 .pio/build/esp32-s3-n16r8/partitions.bin \
+            0x10000 .pio/build/esp32-s3-n16r8/firmware.bin
+          ls -lh .pio/build/esp32-s3-n16r8/firmware-merged.bin
+
+      - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ai-biodome-firmware
@@ -44,11 +54,5 @@ jobs:
             .pio/build/esp32-s3-n16r8/firmware.bin
             .pio/build/esp32-s3-n16r8/bootloader.bin
             .pio/build/esp32-s3-n16r8/partitions.bin
-          if-no-files-found: warn
-
-      - name: Upload merged firmware (single .bin)
-        uses: actions/upload-artifact@v4
-        with:
-          name: ai-biodome-merged
-          path: .pio/build/esp32-s3-n16r8/firmware.merged.bin
+            .pio/build/esp32-s3-n16r8/firmware-merged.bin
           if-no-files-found: warn
