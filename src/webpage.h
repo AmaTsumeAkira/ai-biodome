@@ -286,7 +286,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     <!-- QQ Bot 配置面板 -->
     <div class="bg-white rounded-2xl shadow-sm p-6">
       <div class="flex items-center justify-between mb-4 border-b pb-3">
-        <h2 class="text-xl font-bold text-gray-800">🤖 QQ 机器人告警</h2>
+        <h2 class="text-xl font-bold text-gray-800">🤖 QQ 机器人</h2>
         <div class="flex items-center gap-2">
           <span class="text-xs font-medium" id="qqbot-status">未配置</span>
           <label class="relative inline-flex items-center cursor-pointer">
@@ -305,14 +305,32 @@ const char index_html[] PROGMEM = R"rawliteral(
           <input type="password" id="qqbot-secret" placeholder="输入 AppSecret" class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-400 outline-none">
         </div>
         <div>
-          <label class="block text-xs font-semibold text-gray-500 mb-1">用户 OpenID</label>
+          <label class="block text-xs font-semibold text-gray-500 mb-1">用户 OpenID（可选，主动推送用）</label>
           <input type="text" id="qqbot-groupid" placeholder="目标用户的 openid" class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-400 outline-none">
+        </div>
+      </div>
+      <!-- Gateway 状态 & 指令说明 -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+        <div class="bg-slate-50 rounded-lg p-3">
+          <div class="text-xs font-semibold text-gray-500 mb-2">Gateway 状态</div>
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full" id="gw-status-dot" style="background:#9ca3af"></span>
+            <span class="text-sm" id="gw-status-text">未连接</span>
+          </div>
+        </div>
+        <div class="bg-slate-50 rounded-lg p-3">
+          <div class="text-xs font-semibold text-gray-500 mb-2">用户可发送的指令</div>
+          <div class="text-xs text-gray-600 space-y-1">
+            <div><code class="bg-white px-1.5 py-0.5 rounded border text-blue-600">状态</code> 查看环境数据</div>
+            <div><code class="bg-white px-1.5 py-0.5 rounded border text-blue-600">告警</code> 查看当前告警</div>
+            <div><code class="bg-white px-1.5 py-0.5 rounded border text-blue-600">帮助</code> 显示指令列表</div>
+          </div>
         </div>
       </div>
       <div class="flex items-center gap-3">
         <button onclick="saveQQBotConfig()" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">保存配置</button>
         <button onclick="testQQBot()" class="px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded-lg text-sm font-medium transition-colors">发送测试</button>
-        <span class="text-xs text-gray-400">* 环境异常时自动私聊推送告警（主动消息每月4条限制，建议仅推送严重告警）</span>
+        <span class="text-xs text-gray-400">* 用户私聊机器人即可查询状态；环境异常自动推送告警</span>
       </div>
     </div>
 
@@ -798,12 +816,26 @@ const char index_html[] PROGMEM = R"rawliteral(
           document.getElementById('qqbot-enabled').checked = data.enabled || false;
           var status = document.getElementById('qqbot-status');
           if (!data.appId) { status.innerText = '未配置'; status.className = 'text-xs font-medium text-gray-400'; }
-          else if (data.tokenValid) { status.innerText = '已连接'; status.className = 'text-xs font-medium text-green-600'; }
+          else if (data.gatewayReady) { status.innerText = 'Gateway 就绪'; status.className = 'text-xs font-medium text-green-600'; }
+          else if (data.tokenValid) { status.innerText = 'Token 有效'; status.className = 'text-xs font-medium text-blue-600'; }
           else if (data.enabled) { status.innerText = '已启用'; status.className = 'text-xs font-medium text-blue-600'; }
           else { status.innerText = '已禁用'; status.className = 'text-xs font-medium text-orange-500'; }
+          // Gateway 状态指示
+          var gwDot = document.getElementById('gw-status-dot');
+          var gwText = document.getElementById('gw-status-text');
+          if (data.gatewayReady) {
+            gwDot.style.background = '#22c55e'; gwText.innerText = '已连接，可接收消息';
+          } else if (data.gatewayConnected) {
+            gwDot.style.background = '#f59e0b'; gwText.innerText = '连接中...';
+          } else if (data.enabled) {
+            gwDot.style.background = '#ef4444'; gwText.innerText = '未连接，等待重连';
+          } else {
+            gwDot.style.background = '#9ca3af'; gwText.innerText = '未启用';
+          }
         }).catch(function() {});
       }
       setTimeout(loadQQBotConfig, 3000);
+      setInterval(loadQQBotConfig, 15000);  // 定期刷新 Gateway 状态
 
       window.saveQQBotConfig = function() {
         var secret = document.getElementById('qqbot-secret').value;

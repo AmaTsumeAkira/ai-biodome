@@ -12,6 +12,7 @@
 #include <LittleFS.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <WebSocketsClient.h>
 
 #include "webpage.h"
 
@@ -69,6 +70,17 @@ String qqbotAccessToken = "";
 unsigned long qqbotTokenExpiry = 0;
 unsigned long lastQQBotAlert = 0;
 #define QQBOT_ALERT_INTERVAL 1800000  // 告警消息最短间隔30分钟
+
+// --- QQ Bot WebSocket Gateway (接收用户消息) ---
+WebSocketsClient qqGateway;
+bool qqGwConnected = false;
+bool qqGwIdentified = false;
+unsigned long qqGwHeartbeatInterval = 41250;
+unsigned long qqGwLastHeartbeat = 0;
+int qqGwLastSeq = -1;
+String qqGwSessionId = "";
+unsigned long qqGwReconnectAt = 0;
+#define QQ_GW_RECONNECT_DELAY 10000
 
 // --- 传感器在线状态 ---
 bool sensor_bh1750_ok = false;
@@ -250,9 +262,10 @@ bool refreshQQBotToken() {
   }
 }
 
-// 发送私聊消息给 QQ 用户
-bool sendQQBotMsg(const String& content) {
-  if (!qqbot.enabled || qqbot.userOpenId.isEmpty()) return false;
+// 发送私聊消息给 QQ 用户（支持被动回复 msg_id）
+bool sendQQBotMsg(const String& content, const String& msgId = "", const String& targetOpenId = "") {
+  String openId = targetOpenId.isEmpty() ? qqbot.userOpenId : targetOpenId;
+  if (openId.isEmpty()) return false;
   if (qqbotAccessToken.isEmpty() || millis() > qqbotTokenExpiry) {
     if (!refreshQQBotToken()) return false;
   }
@@ -261,7 +274,7 @@ bool sendQQBotMsg(const String& content) {
   client.setInsecure();
   HTTPClient http;
 
-  String url = "https://api.sbot.qq.com/v2/users/" + qqbot.userOpenId + "/messages";
+  String url = "https://api.sbot.qq.com/v2/users/" + openId + "/messages";
   http.begin(client, url);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", "QQBot " + qqbotAccessToken);
@@ -269,6 +282,9 @@ bool sendQQBotMsg(const String& content) {
   DynamicJsonDocument msgDoc(1024);
   msgDoc["content"] = content;
   msgDoc["msg_type"] = 0;  // 文本消息
+  if (!msgId.isEmpty()) {
+    msgDoc["msg_id"] = msgId;  // 被动回复需要携带 msg_id
+  }
   String msgBody;
   serializeJson(msgDoc, msgBody);
 
@@ -311,6 +327,223 @@ void checkAndSendQQBotAlert() {
   }
 }
 
+// ===================== QQ Bot Gateway (被动消息接收) =====================
+
+// 构建当前环境状态的文本摘要
+String buildStatusText() {
+  String s = "🌱 【AI大棚实时状态】\n";
+  s += "🌡️ 温度: " + String(temp, 1) + "°C\n";
+  s += "💧 湿度: " + String(hum, 1) + "%\n";
+  s += "☀️ 光照: " + String(lux, 0) + " lx\n";
+  s += "🌱 土壤: " + String(soilPercent) + "%\n";
+  s += "☁️ CO2: " + String(eco2) + " ppm\n";
+  s += "🧪 TVOC: " + String(tvoc) + " ppb\n";
+  s += "\n⚙️ 设备状态:\n";
+  s += "  水泵: " + String(statePump ? "开启" : "关闭") + "\n";
+  s += "  补光灯: " + String(stateLight ? "开启" : "关闭") + "\n";
+  s += "  加热: " + String(stateHeater ? "开启" : "关闭") + "\n";
+  s += "  风扇: " + String(stateFan ? "开启" : "关闭") + "\n";
+  s += "  模式: " + String(autoMode ? "自动" : "手动") + "\n";
+  s += "\n⏱️ 运行: " + String((uint32_t)(millis() / 1000 / 3600)) + "h " +
+       String((uint32_t)(millis() / 1000 % 3600 / 60)) + "m";
+  return s;
+}
+
+// 处理用户发送的命令
+void handleQQCommand(const String& content, const String& msgId, const String& userOpenId) {
+  String cmd = content;
+  cmd.trim();
+  cmd.toLowerCase();
+
+  String reply;
+  if (cmd == "状态" || cmd == "查询" || cmd == "/status") {
+    reply = buildStatusText();
+  }
+  else if (cmd == "告警" || cmd == "/alert") {
+    String alerts = "";
+    if (sensor_sht40_ok) {
+      if (temp > 35) alerts += "🔴 温度过高: " + String(temp, 1) + "°C\n";
+      else if (temp < 10) alerts += "🔴 温度过低: " + String(temp, 1) + "°C\n";
+    }
+    if (soilPercent < 20) alerts += "🔴 土壤严重缺水: " + String(soilPercent) + "%\n";
+    if (sensor_sgp30_ok && eco2 > 1500) alerts += "🔴 CO2严重超标: " + String(eco2) + "ppm\n";
+    if (sensor_sgp30_ok && tvoc > 660) alerts += "🔴 有机挥发物超标: " + String(tvoc) + "ppb\n";
+    if (alerts.isEmpty()) {
+      reply = "✅ 当前环境状态良好，无告警";
+    } else {
+      reply = "⚠️ 当前告警:\n" + alerts;
+    }
+  }
+  else if (cmd == "帮助" || cmd == "help" || cmd == "/help" || cmd == "?") {
+    reply = "🤖 AI大棚机器人指令:\n\n";
+    reply += "📊 状态 - 查看当前环境数据\n";
+    reply += "⚠️ 告警 - 查看当前告警信息\n";
+    reply += "❓ 帮助 - 显示本帮助\n";
+    reply += "\n💡 直接发送以上关键词即可";
+  }
+  else {
+    reply = "🤖 你好！发送「帮助」查看可用指令";
+  }
+
+  sendQQBotMsg(reply, msgId, userOpenId);
+  logOperation("QQBOT_RECV", "收到命令: " + content.substring(0, 30));
+}
+
+// 发送 Gateway Identify
+void sendQQGatewayIdentify() {
+  DynamicJsonDocument doc(512);
+  doc["op"] = 2;
+  JsonObject d = doc.createNestedObject("d");
+  d["token"] = "QQBot " + qqbotAccessToken;
+  d["intents"] = (1 << 25);  // GROUP_AND_C2C_EVENT → C2C_MESSAGE_CREATE
+  JsonArray shard = d.createNestedArray("shard");
+  shard.add(0);
+  shard.add(1);
+  String payload;
+  serializeJson(doc, payload);
+  qqGateway.sendTXT(payload);
+  Serial.println("📤 QQ Gateway: Identify 已发送");
+}
+
+// 发送 Gateway Heartbeat
+void sendQQGatewayHeartbeat() {
+  DynamicJsonDocument doc(128);
+  doc["op"] = 1;
+  if (qqGwLastSeq >= 0) {
+    doc["d"] = qqGwLastSeq;
+  } else {
+    doc["d"] = (char*)0;  // JSON null
+  }
+  String payload;
+  serializeJson(doc, payload);
+  qqGateway.sendTXT(payload);
+  qqGwLastHeartbeat = millis();
+}
+
+// Gateway WebSocket 事件回调
+void qqGatewayEvent(WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_CONNECTED:
+      Serial.println("✅ QQ Gateway: WebSocket 已连接");
+      qqGwConnected = true;
+      break;
+
+    case WStype_DISCONNECTED:
+      Serial.println("⚠️ QQ Gateway: WebSocket 断开");
+      qqGwConnected = false;
+      qqGwIdentified = false;
+      qqGwReconnectAt = millis() + QQ_GW_RECONNECT_DELAY;
+      break;
+
+    case WStype_TEXT: {
+      DynamicJsonDocument doc(4096);
+      DeserializationError err = deserializeJson(doc, payload, length);
+      if (err) {
+        Serial.printf("⚠️ QQ Gateway: JSON 解析失败: %s\n", err.c_str());
+        break;
+      }
+
+      int op = doc["op"] | -1;
+
+      if (op == 10) {
+        // Hello - 获取心跳间隔并发送 Identify
+        qqGwHeartbeatInterval = doc["d"]["heartbeat_interval"] | 41250;
+        Serial.printf("📬 QQ Gateway: Hello, heartbeat=%lu ms\n", qqGwHeartbeatInterval);
+
+        // 确保 token 有效
+        if (qqbotAccessToken.isEmpty() || millis() > qqbotTokenExpiry) {
+          refreshQQBotToken();
+        }
+        sendQQGatewayIdentify();
+      }
+      else if (op == 0) {
+        // Dispatch - 事件分发
+        if (!doc["s"].isNull()) {
+          qqGwLastSeq = doc["s"].as<int>();
+        }
+        String t = doc["t"].as<String>();
+
+        if (t == "READY") {
+          qqGwSessionId = doc["d"]["session_id"].as<String>();
+          qqGwIdentified = true;
+          Serial.printf("✅ QQ Gateway: READY, session=%s\n", qqGwSessionId.c_str());
+          logOperation("QQBOT_GW", "Gateway 连接就绪");
+          // 发送首次心跳
+          sendQQGatewayHeartbeat();
+        }
+        else if (t == "C2C_MESSAGE_CREATE") {
+          // 收到用户私聊消息
+          JsonObject d = doc["d"];
+          String msgId = d["id"].as<String>();
+          String content = d["content"].as<String>();
+          String userOpenId = d["author"]["user_openid"].as<String>();
+          content.trim();
+          Serial.printf("📩 QQ C2C消息: [%s] %s\n", userOpenId.c_str(), content.c_str());
+          handleQQCommand(content, msgId, userOpenId);
+        }
+        else {
+          Serial.printf("📬 QQ Gateway 事件: %s\n", t.c_str());
+        }
+      }
+      else if (op == 11) {
+        // Heartbeat ACK
+        Serial.println("💓 QQ Gateway: Heartbeat ACK");
+      }
+      else if (op == 7) {
+        // Reconnect - 服务端要求重连
+        Serial.println("🔄 QQ Gateway: 服务端要求重连");
+        qqGateway.disconnect();
+      }
+      else if (op == 9) {
+        // Invalid Session
+        Serial.println("⚠️ QQ Gateway: Invalid Session, 重新连接");
+        qqGwIdentified = false;
+        qqGwSessionId = "";
+        qqGateway.disconnect();
+      }
+      break;
+    }
+
+    case WStype_ERROR:
+      Serial.println("❌ QQ Gateway: WebSocket 错误");
+      break;
+
+    default:
+      break;
+  }
+}
+
+// 连接 QQ Gateway
+void connectQQGateway() {
+  if (!qqbot.enabled || qqbot.appId.isEmpty()) return;
+
+  // 确保有 access token
+  if (qqbotAccessToken.isEmpty() || millis() > qqbotTokenExpiry) {
+    if (!refreshQQBotToken()) {
+      Serial.println("⚠️ QQ Gateway: 无法获取 Token，稍后重试");
+      qqGwReconnectAt = millis() + QQ_GW_RECONNECT_DELAY;
+      return;
+    }
+  }
+
+  Serial.println("🔌 QQ Gateway: 正在连接...");
+  qqGateway.beginSSL("api.sgroup.qq.com", 443, "/websocket/");
+  qqGateway.onEvent(qqGatewayEvent);
+  qqGateway.setReconnectInterval(0);  // 手动管理重连
+  qqGwReconnectAt = 0;
+}
+
+// 断开 QQ Gateway
+void disconnectQQGateway() {
+  qqGateway.disconnect();
+  qqGwConnected = false;
+  qqGwIdentified = false;
+  qqGwSessionId = "";
+  qqGwLastSeq = -1;
+  qqGwReconnectAt = 0;
+  Serial.println("🔌 QQ Gateway: 已断开");
+}
+
 // HTTP API: QQ Bot 配置保存
 void handleApiQQBotConfig() {
   if (server.method() == HTTP_POST) {
@@ -331,20 +564,25 @@ void handleApiQQBotConfig() {
 
     logOperation("QQBOT", qqbot.enabled ? "已启用" : "已禁用");
 
-    // 如果启用，立即尝试获取 token
+    // 如果启用，立即尝试获取 token 并连接 Gateway
     if (qqbot.enabled && !qqbot.appId.isEmpty()) {
       refreshQQBotToken();
+      connectQQGateway();
+    } else {
+      disconnectQQGateway();
     }
 
     server.send(200, "application/json", "{\"ok\":true}");
   } else {
     // GET - 返回当前配置 (不返回 secret)
-    DynamicJsonDocument doc(256);
+    DynamicJsonDocument doc(512);
     doc["appId"] = qqbot.appId;
     doc["userOpenId"] = qqbot.userOpenId;
     doc["enabled"] = qqbot.enabled;
     doc["hasSecret"] = !qqbot.appSecret.isEmpty();
     doc["tokenValid"] = (!qqbotAccessToken.isEmpty() && millis() < qqbotTokenExpiry);
+    doc["gatewayConnected"] = qqGwConnected;
+    doc["gatewayReady"] = qqGwIdentified;
     String output;
     serializeJson(doc, output);
     server.send(200, "application/json", output);
@@ -943,6 +1181,11 @@ void setup() {
     server.on("/api/dates", handleApiDates);
     server.on("/api/qqbot/config", handleApiQQBotConfig);
     server.on("/api/qqbot/test", handleApiQQBotTest);
+
+    // 启动 QQ Bot Gateway
+    if (qqbot.enabled && !qqbot.appId.isEmpty()) {
+      connectQQGateway();
+    }
   } else {
     setLED(255, 100, 0);
     WiFi.mode(WIFI_AP);
@@ -959,6 +1202,21 @@ void loop() {
   
   if (WiFi.status() == WL_CONNECTED) {
     webSocket.loop(); 
+
+    // QQ Gateway WebSocket 循环
+    if (qqbot.enabled) {
+      qqGateway.loop();
+
+      // 定时心跳
+      if (qqGwIdentified && millis() - qqGwLastHeartbeat > qqGwHeartbeatInterval) {
+        sendQQGatewayHeartbeat();
+      }
+
+      // 断线重连
+      if (!qqGwConnected && qqGwReconnectAt > 0 && millis() > qqGwReconnectAt) {
+        connectQQGateway();
+      }
+    }
 
     // SGP30 要求每 1 秒读取一次以保持内部校准算法稳定
     static unsigned long lastSGP = 0;
