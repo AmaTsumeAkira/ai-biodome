@@ -305,14 +305,14 @@ const char index_html[] PROGMEM = R"rawliteral(
           <input type="password" id="qqbot-secret" placeholder="输入 AppSecret" class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-400 outline-none">
         </div>
         <div>
-          <label class="block text-xs font-semibold text-gray-500 mb-1">群 OpenID</label>
-          <input type="text" id="qqbot-groupid" placeholder="目标群的 group_openid" class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-400 outline-none">
+          <label class="block text-xs font-semibold text-gray-500 mb-1">用户 OpenID</label>
+          <input type="text" id="qqbot-groupid" placeholder="目标用户的 openid" class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-400 outline-none">
         </div>
       </div>
       <div class="flex items-center gap-3">
         <button onclick="saveQQBotConfig()" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">保存配置</button>
         <button onclick="testQQBot()" class="px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded-lg text-sm font-medium transition-colors">发送测试</button>
-        <span class="text-xs text-gray-400">* 环境异常时自动推送告警到QQ群（最短间隔30分钟）</span>
+        <span class="text-xs text-gray-400">* 环境异常时自动私聊推送告警（主动消息每月4条限制，建议仅推送严重告警）</span>
       </div>
     </div>
 
@@ -794,7 +794,7 @@ const char index_html[] PROGMEM = R"rawliteral(
       function loadQQBotConfig() {
         fetch('/api/qqbot/config').then(function(r) { return r.json(); }).then(function(data) {
           document.getElementById('qqbot-appid').value = data.appId || '';
-          document.getElementById('qqbot-groupid').value = data.groupOpenId || '';
+          document.getElementById('qqbot-groupid').value = data.userOpenId || '';
           document.getElementById('qqbot-enabled').checked = data.enabled || false;
           var status = document.getElementById('qqbot-status');
           if (!data.appId) { status.innerText = '未配置'; status.className = 'text-xs font-medium text-gray-400'; }
@@ -809,7 +809,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         var secret = document.getElementById('qqbot-secret').value;
         var body = {
           appId: document.getElementById('qqbot-appid').value,
-          groupOpenId: document.getElementById('qqbot-groupid').value,
+          userOpenId: document.getElementById('qqbot-groupid').value,
           enabled: document.getElementById('qqbot-enabled').checked
         };
         if (secret) body.appSecret = secret;

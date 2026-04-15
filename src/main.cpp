@@ -61,7 +61,7 @@ unsigned long lastDataSave = 0;
 struct QQBotConfig {
   String appId;
   String appSecret;
-  String groupOpenId;
+  String userOpenId;  // 用户私聊 openid
   bool enabled = false;
 } qqbot;
 
@@ -250,9 +250,9 @@ bool refreshQQBotToken() {
   }
 }
 
-// 发送消息到 QQ 群
-bool sendQQBotGroupMsg(const String& content) {
-  if (!qqbot.enabled || qqbot.groupOpenId.isEmpty()) return false;
+// 发送私聊消息给 QQ 用户
+bool sendQQBotMsg(const String& content) {
+  if (!qqbot.enabled || qqbot.userOpenId.isEmpty()) return false;
   if (qqbotAccessToken.isEmpty() || millis() > qqbotTokenExpiry) {
     if (!refreshQQBotToken()) return false;
   }
@@ -261,7 +261,7 @@ bool sendQQBotGroupMsg(const String& content) {
   client.setInsecure();
   HTTPClient http;
 
-  String url = "https://api.sbot.qq.com/v2/groups/" + qqbot.groupOpenId + "/messages";
+  String url = "https://api.sbot.qq.com/v2/users/" + qqbot.userOpenId + "/messages";
   http.begin(client, url);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", "QQBot " + qqbotAccessToken);
@@ -306,7 +306,7 @@ void checkAndSendQQBotAlert() {
   msg += " 光照" + String(lux, 0) + "lx 土壤" + String(soilPercent) + "%";
   msg += " CO2:" + String(eco2) + "ppm TVOC:" + String(tvoc) + "ppb";
 
-  if (sendQQBotGroupMsg(msg)) {
+  if (sendQQBotMsg(msg)) {
     lastQQBotAlert = millis();
   }
 }
@@ -318,14 +318,14 @@ void handleApiQQBotConfig() {
     deserializeJson(doc, server.arg("plain"));
     qqbot.appId = doc["appId"].as<String>();
     qqbot.appSecret = doc["appSecret"].as<String>();
-    qqbot.groupOpenId = doc["groupOpenId"].as<String>();
+    qqbot.userOpenId = doc["userOpenId"].as<String>();
     qqbot.enabled = doc["enabled"] | false;
 
     // 保存到 Preferences
     preferences.begin("qqbot", false);
     preferences.putString("appId", qqbot.appId);
     preferences.putString("secret", qqbot.appSecret);
-    preferences.putString("groupId", qqbot.groupOpenId);
+    preferences.putString("userId", qqbot.userOpenId);
     preferences.putBool("enabled", qqbot.enabled);
     preferences.end();
 
@@ -341,7 +341,7 @@ void handleApiQQBotConfig() {
     // GET - 返回当前配置 (不返回 secret)
     DynamicJsonDocument doc(256);
     doc["appId"] = qqbot.appId;
-    doc["groupOpenId"] = qqbot.groupOpenId;
+    doc["userOpenId"] = qqbot.userOpenId;
     doc["enabled"] = qqbot.enabled;
     doc["hasSecret"] = !qqbot.appSecret.isEmpty();
     doc["tokenValid"] = (!qqbotAccessToken.isEmpty() && millis() < qqbotTokenExpiry);
@@ -360,7 +360,7 @@ void handleApiQQBotTest() {
   String msg = "🌱 【AI大棚测试消息】\n系统运行正常！\n";
   msg += "温度:" + String(temp, 1) + "°C 湿度:" + String(hum, 1) + "%";
   msg += " 光照:" + String(lux, 0) + "lx 土壤:" + String(soilPercent) + "%";
-  bool ok = sendQQBotGroupMsg(msg);
+  bool ok = sendQQBotMsg(msg);
   server.send(ok ? 200 : 500, "application/json",
     ok ? "{\"ok\":true}" : "{\"error\":\"发送失败\"}");
 }
@@ -905,7 +905,7 @@ void setup() {
   preferences.begin("qqbot", true);
   qqbot.appId = preferences.getString("appId", "");
   qqbot.appSecret = preferences.getString("secret", "");
-  qqbot.groupOpenId = preferences.getString("groupId", "");
+  qqbot.userOpenId = preferences.getString("userId", "");
   qqbot.enabled = preferences.getBool("enabled", false);
   preferences.end();
   if (qqbot.enabled) Serial.println("✅ QQ Bot 已启用");
