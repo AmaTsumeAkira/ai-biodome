@@ -283,6 +283,39 @@ const char index_html[] PROGMEM = R"rawliteral(
       <div class="bg-white rounded-2xl shadow-sm p-4 h-80 w-full" id="chart-aq"></div>
     </div>
 
+    <!-- QQ Bot 配置面板 -->
+    <div class="bg-white rounded-2xl shadow-sm p-6">
+      <div class="flex items-center justify-between mb-4 border-b pb-3">
+        <h2 class="text-xl font-bold text-gray-800">🤖 QQ 机器人告警</h2>
+        <div class="flex items-center gap-2">
+          <span class="text-xs font-medium" id="qqbot-status">未配置</span>
+          <label class="relative inline-flex items-center cursor-pointer">
+            <input type="checkbox" id="qqbot-enabled" class="sr-only peer toggle-switch" onchange="saveQQBotConfig()">
+            <div class="w-10 h-5 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+          </label>
+        </div>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-500 mb-1">AppID</label>
+          <input type="text" id="qqbot-appid" placeholder="输入 QQ Bot AppID" class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-400 outline-none">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-500 mb-1">AppSecret</label>
+          <input type="password" id="qqbot-secret" placeholder="输入 AppSecret" class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-400 outline-none">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-500 mb-1">群 OpenID</label>
+          <input type="text" id="qqbot-groupid" placeholder="目标群的 group_openid" class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-400 outline-none">
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <button onclick="saveQQBotConfig()" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">保存配置</button>
+        <button onclick="testQQBot()" class="px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded-lg text-sm font-medium transition-colors">发送测试</button>
+        <span class="text-xs text-gray-400">* 环境异常时自动推送告警到QQ群（最短间隔30分钟）</span>
+      </div>
+    </div>
+
     <!-- 历史数据查询面板 -->
     <div class="bg-white rounded-2xl shadow-sm p-6">
       <div class="flex flex-col md:flex-row items-center justify-between mb-4 border-b pb-3">
@@ -755,6 +788,44 @@ const char index_html[] PROGMEM = R"rawliteral(
           light_start: document.getElementById('sched-light-start').value || '00:00',
           light_end: document.getElementById('sched-light-end').value || '00:00'
         }));
+      };
+
+      // ----- QQ Bot 配置 -----
+      function loadQQBotConfig() {
+        fetch('/api/qqbot/config').then(function(r) { return r.json(); }).then(function(data) {
+          document.getElementById('qqbot-appid').value = data.appId || '';
+          document.getElementById('qqbot-groupid').value = data.groupOpenId || '';
+          document.getElementById('qqbot-enabled').checked = data.enabled || false;
+          var status = document.getElementById('qqbot-status');
+          if (!data.appId) { status.innerText = '未配置'; status.className = 'text-xs font-medium text-gray-400'; }
+          else if (data.tokenValid) { status.innerText = '已连接'; status.className = 'text-xs font-medium text-green-600'; }
+          else if (data.enabled) { status.innerText = '已启用'; status.className = 'text-xs font-medium text-blue-600'; }
+          else { status.innerText = '已禁用'; status.className = 'text-xs font-medium text-orange-500'; }
+        }).catch(function() {});
+      }
+      setTimeout(loadQQBotConfig, 3000);
+
+      window.saveQQBotConfig = function() {
+        var secret = document.getElementById('qqbot-secret').value;
+        var body = {
+          appId: document.getElementById('qqbot-appid').value,
+          groupOpenId: document.getElementById('qqbot-groupid').value,
+          enabled: document.getElementById('qqbot-enabled').checked
+        };
+        if (secret) body.appSecret = secret;
+        fetch('/api/qqbot/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        }).then(function(r) { return r.json(); }).then(function(data) {
+          if (data.ok) { alert('QQ Bot 配置已保存'); loadQQBotConfig(); }
+        }).catch(function(e) { alert('保存失败: ' + e.message); });
+      };
+
+      window.testQQBot = function() {
+        fetch('/api/qqbot/test').then(function(r) { return r.json(); }).then(function(data) {
+          alert(data.ok ? '测试消息发送成功！' : ('发送失败: ' + (data.error || '未知错误')));
+        }).catch(function(e) { alert('请求失败: ' + e.message); });
       };
 
       // ----- AI 助手交互逻辑 -----

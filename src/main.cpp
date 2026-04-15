@@ -10,6 +10,8 @@
 #include <Adafruit_SGP30.h>
 #include <time.h>
 #include <LittleFS.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 
 #include "webpage.h"
 
@@ -54,6 +56,19 @@ bool littlefs_ok = false;
 #define DATA_SAVE_INTERVAL 300000  // 每5分钟归档一次传感器数据
 #define MAX_DATA_AGE_DAYS 30       // 保留最30天的数据
 unsigned long lastDataSave = 0;
+
+// --- QQ Bot 配置 ---
+struct QQBotConfig {
+  String appId;
+  String appSecret;
+  String groupOpenId;
+  bool enabled = false;
+} qqbot;
+
+String qqbotAccessToken = "";
+unsigned long qqbotTokenExpiry = 0;
+unsigned long lastQQBotAlert = 0;
+#define QQBOT_ALERT_INTERVAL 1800000  // 告警消息最短间隔30分钟
 
 // --- 传感器在线状态 ---
 bool sensor_bh1750_ok = false;
@@ -197,6 +212,157 @@ void cleanOldFiles(const char* dir) {
     }
     file = root.openNextFile();
   }
+}
+
+// ===================== QQ Bot 集成 =====================
+
+// 获取 QQ Bot Access Token
+bool refreshQQBotToken() {
+  if (qqbot.appId.isEmpty() || qqbot.appSecret.isEmpty()) return false;
+
+  WiFiClientSecure client;
+  client.setInsecure();  // 跳过证书验证（学术项目简化处理）
+  HTTPClient http;
+
+  http.begin(client, "https://bots.qq.com/app/getAppAccessToken");
+  http.addHeader("Content-Type", "application/json");
+
+  DynamicJsonDocument reqDoc(256);
+  reqDoc["appId"] = qqbot.appId;
+  reqDoc["clientSecret"] = qqbot.appSecret;
+  String reqBody;
+  serializeJson(reqDoc, reqBody);
+
+  int code = http.POST(reqBody);
+  if (code == 200) {
+    DynamicJsonDocument resDoc(512);
+    deserializeJson(resDoc, http.getString());
+    qqbotAccessToken = resDoc["access_token"].as<String>();
+    int expiresIn = resDoc["expires_in"] | 7200;
+    qqbotTokenExpiry = millis() + (expiresIn - 60) * 1000UL;  // 提前60秒刷新
+    Serial.println("✅ QQ Bot Token 获取成功");
+    http.end();
+    return true;
+  } else {
+    Serial.printf("⚠️ QQ Bot Token 获取失败, code=%d\n", code);
+    http.end();
+    return false;
+  }
+}
+
+// 发送消息到 QQ 群
+bool sendQQBotGroupMsg(const String& content) {
+  if (!qqbot.enabled || qqbot.groupOpenId.isEmpty()) return false;
+  if (qqbotAccessToken.isEmpty() || millis() > qqbotTokenExpiry) {
+    if (!refreshQQBotToken()) return false;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+
+  String url = "https://api.sbot.qq.com/v2/groups/" + qqbot.groupOpenId + "/messages";
+  http.begin(client, url);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", "QQBot " + qqbotAccessToken);
+
+  DynamicJsonDocument msgDoc(1024);
+  msgDoc["content"] = content;
+  msgDoc["msg_type"] = 0;  // 文本消息
+  String msgBody;
+  serializeJson(msgDoc, msgBody);
+
+  int code = http.POST(msgBody);
+  bool ok = (code == 200 || code == 201);
+  if (ok) {
+    Serial.println("✅ QQ Bot 消息发送成功");
+    logOperation("QQBOT", "发送告警: " + content.substring(0, 50));
+  } else {
+    Serial.printf("⚠️ QQ Bot 消息发送失败, code=%d, resp=%s\n", code, http.getString().c_str());
+  }
+  http.end();
+  return ok;
+}
+
+// 构建环境告警消息
+void checkAndSendQQBotAlert() {
+  if (!qqbot.enabled || WiFi.status() != WL_CONNECTED) return;
+  if (millis() - lastQQBotAlert < QQBOT_ALERT_INTERVAL) return;
+
+  String alerts = "";
+
+  if (sensor_sht40_ok) {
+    if (temp > 35) alerts += "🔴 温度过高: " + String(temp, 1) + "°C\n";
+    else if (temp < 10) alerts += "🔴 温度过低: " + String(temp, 1) + "°C\n";
+  }
+  if (soilPercent < 20) alerts += "🔴 土壤严重缺水: " + String(soilPercent) + "%\n";
+  if (sensor_sgp30_ok && eco2 > 1500) alerts += "🔴 CO2严重超标: " + String(eco2) + "ppm\n";
+  if (sensor_sgp30_ok && tvoc > 660) alerts += "🔴 有机挥发物超标: " + String(tvoc) + "ppb\n";
+
+  if (alerts.isEmpty()) return;
+
+  String msg = "🌱 【AI大棚告警】\n" + alerts;
+  msg += "\n📊 当前状态: 温度" + String(temp, 1) + "°C 湿度" + String(hum, 1) + "%";
+  msg += " 光照" + String(lux, 0) + "lx 土壤" + String(soilPercent) + "%";
+  msg += " CO2:" + String(eco2) + "ppm TVOC:" + String(tvoc) + "ppb";
+
+  if (sendQQBotGroupMsg(msg)) {
+    lastQQBotAlert = millis();
+  }
+}
+
+// HTTP API: QQ Bot 配置保存
+void handleApiQQBotConfig() {
+  if (server.method() == HTTP_POST) {
+    DynamicJsonDocument doc(512);
+    deserializeJson(doc, server.arg("plain"));
+    qqbot.appId = doc["appId"].as<String>();
+    qqbot.appSecret = doc["appSecret"].as<String>();
+    qqbot.groupOpenId = doc["groupOpenId"].as<String>();
+    qqbot.enabled = doc["enabled"] | false;
+
+    // 保存到 Preferences
+    preferences.begin("qqbot", false);
+    preferences.putString("appId", qqbot.appId);
+    preferences.putString("secret", qqbot.appSecret);
+    preferences.putString("groupId", qqbot.groupOpenId);
+    preferences.putBool("enabled", qqbot.enabled);
+    preferences.end();
+
+    logOperation("QQBOT", qqbot.enabled ? "已启用" : "已禁用");
+
+    // 如果启用，立即尝试获取 token
+    if (qqbot.enabled && !qqbot.appId.isEmpty()) {
+      refreshQQBotToken();
+    }
+
+    server.send(200, "application/json", "{\"ok\":true}");
+  } else {
+    // GET - 返回当前配置 (不返回 secret)
+    DynamicJsonDocument doc(256);
+    doc["appId"] = qqbot.appId;
+    doc["groupOpenId"] = qqbot.groupOpenId;
+    doc["enabled"] = qqbot.enabled;
+    doc["hasSecret"] = !qqbot.appSecret.isEmpty();
+    doc["tokenValid"] = (!qqbotAccessToken.isEmpty() && millis() < qqbotTokenExpiry);
+    String output;
+    serializeJson(doc, output);
+    server.send(200, "application/json", output);
+  }
+}
+
+// HTTP API: 测试 QQ Bot 发送
+void handleApiQQBotTest() {
+  if (!qqbot.enabled) {
+    server.send(400, "application/json", "{\"error\":\"QQ Bot 未启用\"}");
+    return;
+  }
+  String msg = "🌱 【AI大棚测试消息】\n系统运行正常！\n";
+  msg += "温度:" + String(temp, 1) + "°C 湿度:" + String(hum, 1) + "%";
+  msg += " 光照:" + String(lux, 0) + "lx 土壤:" + String(soilPercent) + "%";
+  bool ok = sendQQBotGroupMsg(msg);
+  server.send(ok ? 200 : 500, "application/json",
+    ok ? "{\"ok\":true}" : "{\"error\":\"发送失败\"}");
 }
 
 // HTTP API: 获取指定日期的历史数据
@@ -735,6 +901,15 @@ void setup() {
   sched.light_end = preferences.getString("l_e", "00:00");
   preferences.end();
 
+  // 加载 QQ Bot 配置
+  preferences.begin("qqbot", true);
+  qqbot.appId = preferences.getString("appId", "");
+  qqbot.appSecret = preferences.getString("secret", "");
+  qqbot.groupOpenId = preferences.getString("groupId", "");
+  qqbot.enabled = preferences.getBool("enabled", false);
+  preferences.end();
+  if (qqbot.enabled) Serial.println("✅ QQ Bot 已启用");
+
   preferences.begin("wifi-config", true);
   String ssid = preferences.getString("ssid", "");
   String pass = preferences.getString("password", "");
@@ -766,6 +941,8 @@ void setup() {
     server.on("/api/history", handleApiHistory);
     server.on("/api/log", handleApiLog);
     server.on("/api/dates", handleApiDates);
+    server.on("/api/qqbot/config", handleApiQQBotConfig);
+    server.on("/api/qqbot/test", handleApiQQBotTest);
   } else {
     setLED(255, 100, 0);
     WiFi.mode(WIFI_AP);
@@ -836,6 +1013,7 @@ void loop() {
     if (millis() - lastDataSave > DATA_SAVE_INTERVAL) {
       lastDataSave = millis();
       saveDataToFile();
+      checkAndSendQQBotAlert();  // 顺便检查是否需要发告警
     }
 
     // 每天凌晨清理过期文件（通过检查小时:分钟实现）
