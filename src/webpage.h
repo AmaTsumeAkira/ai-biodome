@@ -282,6 +282,48 @@ const char index_html[] PROGMEM = R"rawliteral(
       <div class="bg-white rounded-2xl shadow-sm p-4 h-80 w-full" id="chart-ls"></div>
       <div class="bg-white rounded-2xl shadow-sm p-4 h-80 w-full" id="chart-aq"></div>
     </div>
+
+    <!-- 历史数据查询面板 -->
+    <div class="bg-white rounded-2xl shadow-sm p-6">
+      <div class="flex flex-col md:flex-row items-center justify-between mb-4 border-b pb-3">
+        <h2 class="text-xl font-bold text-gray-800">📁 历史数据归档</h2>
+        <div class="flex items-center gap-3 mt-3 md:mt-0">
+          <select id="hist-date-select" class="px-3 py-2 rounded-lg border border-gray-200 text-sm focus:ring-2 focus:ring-blue-400 outline-none">
+            <option value="">加载中...</option>
+          </select>
+          <button onclick="loadHistoryData()" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">查询数据</button>
+          <button onclick="loadHistoryLog()" class="px-4 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-lg text-sm font-medium transition-colors">查看日志</button>
+        </div>
+      </div>
+      <div class="text-xs text-gray-400 mb-4" id="storage-info">存储状态加载中...</div>
+      <!-- 归档图表 -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6" id="hist-charts-wrap" style="display:none;">
+        <div class="bg-slate-50 rounded-xl p-3 h-72" id="hist-chart-th"></div>
+        <div class="bg-slate-50 rounded-xl p-3 h-72" id="hist-chart-ls"></div>
+        <div class="bg-slate-50 rounded-xl p-3 h-72" id="hist-chart-aq"></div>
+      </div>
+      <!-- 归档统计摘要 -->
+      <div id="hist-stats-wrap" style="display:none;" class="mb-4">
+        <h3 class="text-sm font-bold text-gray-600 mb-2">当日统计摘要</h3>
+        <div class="overflow-x-auto">
+          <table class="min-w-full text-sm text-center">
+            <thead><tr class="bg-slate-50 text-gray-600">
+              <th class="px-3 py-2 font-semibold text-left">指标</th>
+              <th class="px-3 py-2 font-semibold">最小值</th>
+              <th class="px-3 py-2 font-semibold">最大值</th>
+              <th class="px-3 py-2 font-semibold">平均值</th>
+              <th class="px-3 py-2 font-semibold">数据点数</th>
+            </tr></thead>
+            <tbody id="hist-stats-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <!-- 操作日志 -->
+      <div id="hist-log-wrap" style="display:none;">
+        <h3 class="text-sm font-bold text-gray-600 mb-2">操作日志</h3>
+        <div id="hist-log-list" class="bg-slate-50 rounded-lg p-4 max-h-64 overflow-y-auto text-xs font-mono text-gray-700 space-y-1"></div>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -540,6 +582,28 @@ const char index_html[] PROGMEM = R"rawliteral(
             if (cb) { cb.disabled = isAuto; cb.checked = (data.state[dev] === 1); }
           });
         }
+
+        // 同步调度配置到前端
+        if (data.sched) {
+          document.getElementById('sched-fan-en').checked = data.sched.fan_en;
+          document.getElementById('sched-fan-start').value = data.sched.fan_start || '00:00';
+          document.getElementById('sched-fan-end').value = data.sched.fan_end || '00:00';
+          document.getElementById('sched-light-en').checked = data.sched.light_en;
+          document.getElementById('sched-light-start').value = data.sched.light_start || '00:00';
+          document.getElementById('sched-light-end').value = data.sched.light_end || '00:00';
+        }
+
+        // 同步系统时间显示
+        if (data.time) {
+          document.getElementById('val-time-sync').innerText = '系统时间: ' + data.time;
+        }
+
+        // 存储信息
+        if (data.system && data.system.fs_total) {
+          var fsPct = ((data.system.fs_used / data.system.fs_total) * 100).toFixed(1);
+          var fsInfo = document.getElementById('storage-info');
+          if (fsInfo) fsInfo.innerText = '存储: ' + (data.system.fs_used/1024).toFixed(1) + ' KB / ' + (data.system.fs_total/1024).toFixed(0) + ' KB (' + fsPct + '%)';
+        }
       }
 
       window.toggleMode = function() {
@@ -549,6 +613,148 @@ const char index_html[] PROGMEM = R"rawliteral(
       window.toggleDevice = function(dev) {
         var isOn = document.getElementById('cb-' + dev).checked;
         if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ action: 'set_device', device: dev, state: isOn ? 1 : 0 }));
+      };
+
+      // ----- 历史数据归档查询 -----
+      var histChartTH = null, histChartLS = null, histChartAQ = null;
+
+      function initHistCharts() {
+        if (histChartTH) return;
+        histChartTH = echarts.init(document.getElementById('hist-chart-th'));
+        histChartLS = echarts.init(document.getElementById('hist-chart-ls'));
+        histChartAQ = echarts.init(document.getElementById('hist-chart-aq'));
+      }
+
+      // 加载可用日期列表
+      function loadAvailableDates() {
+        fetch('/api/dates').then(function(r) { return r.json(); }).then(function(data) {
+          var sel = document.getElementById('hist-date-select');
+          sel.innerHTML = '';
+          var dates = (data.data_dates || []).sort().reverse();
+          if (dates.length === 0) {
+            sel.innerHTML = '<option value="">暂无归档数据</option>';
+          } else {
+            dates.forEach(function(d) {
+              var opt = document.createElement('option');
+              opt.value = d;
+              opt.text = d.substring(0,4) + '-' + d.substring(4,6) + '-' + d.substring(6,8);
+              sel.appendChild(opt);
+            });
+          }
+          if (data.total_bytes) {
+            var usedPct = ((data.used_bytes / data.total_bytes) * 100).toFixed(1);
+            var usedKB = (data.used_bytes / 1024).toFixed(1);
+            var totalKB = (data.total_bytes / 1024).toFixed(0);
+            document.getElementById('storage-info').innerText =
+              '存储: ' + usedKB + ' KB / ' + totalKB + ' KB (' + usedPct + '%)  |  归档天数: ' + dates.length;
+          }
+        }).catch(function() {
+          document.getElementById('storage-info').innerText = '存储状态获取失败';
+        });
+      }
+      // 页面加载后获取日期列表
+      setTimeout(loadAvailableDates, 2000);
+
+      window.loadHistoryData = function() {
+        var date = document.getElementById('hist-date-select').value;
+        if (!date) return;
+        fetch('/api/history?date=' + date).then(function(r) { return r.json(); }).then(function(data) {
+          if (data.error) { alert(data.error); return; }
+          document.getElementById('hist-charts-wrap').style.display = '';
+          document.getElementById('hist-stats-wrap').style.display = '';
+          document.getElementById('hist-log-wrap').style.display = 'none';
+          initHistCharts();
+
+          var dateLabel = date.substring(0,4)+'-'+date.substring(4,6)+'-'+date.substring(6,8);
+          histChartTH.setOption({
+            title: { text: dateLabel + ' 温湿度', left: 'center', textStyle: { color: '#475569', fontSize: 13 } },
+            tooltip: { trigger: 'axis' }, legend: { data: ['温度(°C)','湿度(%)'], top: 22, itemWidth: 10, itemHeight: 10 },
+            grid: { left: '15%', right: '15%', bottom: '10%', top: '25%' },
+            xAxis: { type: 'category', data: data.time || [] },
+            yAxis: [ { type:'value', name:'°C' }, { type:'value', name:'%', position:'right', min:0, max:100 } ],
+            series: [
+              { name:'温度(°C)', type:'line', data: data.temp||[], smooth:true, itemStyle:{color:'#ef4444'}, areaStyle:{opacity:0.1} },
+              { name:'湿度(%)', type:'line', yAxisIndex:1, data: data.hum||[], smooth:true, itemStyle:{color:'#3b82f6'}, areaStyle:{opacity:0.1} }
+            ]
+          });
+          histChartLS.setOption({
+            title: { text: dateLabel + ' 光照与土壤', left: 'center', textStyle: { color: '#475569', fontSize: 13 } },
+            tooltip: { trigger: 'axis' }, legend: { data: ['光照(lx)','土壤(%)'], top: 22, itemWidth: 10, itemHeight: 10 },
+            grid: { left: '15%', right: '15%', bottom: '10%', top: '25%' },
+            xAxis: { type: 'category', data: data.time || [] },
+            yAxis: [ { type:'value', name:'lx' }, { type:'value', name:'%', position:'right', min:0, max:100 } ],
+            series: [
+              { name:'光照(lx)', type:'line', data: data.lux||[], smooth:true, itemStyle:{color:'#f97316'}, areaStyle:{opacity:0.1} },
+              { name:'土壤(%)', type:'line', yAxisIndex:1, data: data.soil||[], smooth:true, itemStyle:{color:'#22c55e'}, areaStyle:{opacity:0.1} }
+            ]
+          });
+          histChartAQ.setOption({
+            title: { text: dateLabel + ' 空气质量', left: 'center', textStyle: { color: '#475569', fontSize: 13 } },
+            tooltip: { trigger: 'axis' }, legend: { data: ['eCO2(ppm)','TVOC(ppb)'], top: 22, itemWidth: 10, itemHeight: 10 },
+            grid: { left: '15%', right: '15%', bottom: '10%', top: '25%' },
+            xAxis: { type: 'category', data: data.time || [] },
+            yAxis: [ { type:'value', name:'ppm', min:400 }, { type:'value', name:'ppb', position:'right' } ],
+            series: [
+              { name:'eCO2(ppm)', type:'line', data: data.eco2||[], smooth:true, itemStyle:{color:'#14b8a6'}, areaStyle:{opacity:0.1} },
+              { name:'TVOC(ppb)', type:'line', yAxisIndex:1, data: data.tvoc||[], smooth:true, itemStyle:{color:'#a855f7'}, areaStyle:{opacity:0.1} }
+            ]
+          });
+
+          // 统计摘要
+          var metrics = [
+            {key:'temp', label:'🌡️ 温度', unit:'°C', dec:1},
+            {key:'hum', label:'💧 湿度', unit:'%', dec:1},
+            {key:'lux', label:'☀️ 光照', unit:'lx', dec:0},
+            {key:'soil', label:'🌱 土壤', unit:'%', dec:0},
+            {key:'eco2', label:'☁️ eCO2', unit:'ppm', dec:0},
+            {key:'tvoc', label:'🧪 TVOC', unit:'ppb', dec:0}
+          ];
+          var rows = '';
+          metrics.forEach(function(m) {
+            var s = calcStats(data[m.key]);
+            if (s) {
+              rows += '<tr class="border-b border-slate-100 hover:bg-slate-50">';
+              rows += '<td class="px-3 py-2 font-medium text-gray-700 text-left">' + m.label + '</td>';
+              rows += '<td class="px-3 py-2 text-blue-600 font-mono">' + s.min.toFixed(m.dec) + ' ' + m.unit + '</td>';
+              rows += '<td class="px-3 py-2 text-red-500 font-mono">' + s.max.toFixed(m.dec) + ' ' + m.unit + '</td>';
+              rows += '<td class="px-3 py-2 text-gray-600 font-mono">' + s.avg.toFixed(m.dec) + ' ' + m.unit + '</td>';
+              rows += '<td class="px-3 py-2 text-green-700 font-mono font-bold">' + (data[m.key]||[]).length + '</td>';
+              rows += '</tr>';
+            }
+          });
+          document.getElementById('hist-stats-body').innerHTML = rows;
+        }).catch(function(e) { alert('查询失败: ' + e.message); });
+      };
+
+      window.loadHistoryLog = function() {
+        var date = document.getElementById('hist-date-select').value;
+        if (!date) return;
+        fetch('/api/log?date=' + date).then(function(r) { return r.json(); }).then(function(data) {
+          if (data.error) { alert(data.error); return; }
+          document.getElementById('hist-charts-wrap').style.display = 'none';
+          document.getElementById('hist-stats-wrap').style.display = 'none';
+          document.getElementById('hist-log-wrap').style.display = '';
+          var list = document.getElementById('hist-log-list');
+          if (!data.entries || data.entries.length === 0) {
+            list.innerHTML = '<div class="text-gray-400">当日无操作记录</div>';
+          } else {
+            list.innerHTML = data.entries.map(function(e) { return '<div class="py-1 border-b border-slate-200">' + e.replace(/</g,'&lt;') + '</div>'; }).join('');
+          }
+        }).catch(function(e) { alert('查询失败: ' + e.message); });
+      };
+
+      // ----- 定时调度保存与同步 -----
+      window.saveSchedule = function() {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({
+          action: 'set_sched',
+          fan_en: document.getElementById('sched-fan-en').checked,
+          fan_start: document.getElementById('sched-fan-start').value || '00:00',
+          fan_end: document.getElementById('sched-fan-end').value || '00:00',
+          light_en: document.getElementById('sched-light-en').checked,
+          light_start: document.getElementById('sched-light-start').value || '00:00',
+          light_end: document.getElementById('sched-light-end').value || '00:00'
+        }));
       };
 
       // ----- AI 助手交互逻辑 -----

@@ -7,8 +7,9 @@
 #include <Wire.h>
 #include <BH1750.h>
 #include <Adafruit_NeoPixel.h>
-#include <Adafruit_SGP30.h> // 👇 新增 SGP30 对象
+#include <Adafruit_SGP30.h>
 #include <time.h>
+#include <LittleFS.h>
 
 #include "webpage.h"
 
@@ -48,6 +49,12 @@ uint16_t eco2 = 400, tvoc = 0;
 unsigned long lastBaselineSave = 0;
 #define BASELINE_SAVE_INTERVAL 3600000  // 每1小时保存一次基准线
 
+// --- LittleFS 持久化存储 ---
+bool littlefs_ok = false;
+#define DATA_SAVE_INTERVAL 300000  // 每5分钟归档一次传感器数据
+#define MAX_DATA_AGE_DAYS 30       // 保留最30天的数据
+unsigned long lastDataSave = 0;
+
 // --- 传感器在线状态 ---
 bool sensor_bh1750_ok = false;
 bool sensor_sht40_ok = false;
@@ -86,6 +93,257 @@ int history_count = 0;
 void setLED(uint8_t r, uint8_t g, uint8_t b) {
   pixel.setPixelColor(0, pixel.Color(r, g, b));
   pixel.show();
+}
+
+// ===================== LittleFS 持久化存储 =====================
+
+String getDateStr() {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    char buf[11];
+    strftime(buf, sizeof(buf), "%Y%m%d", &timeinfo);
+    return String(buf);
+  }
+  return "";
+}
+
+String getTimeStr() {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    char buf[20];
+    strftime(buf, sizeof(buf), "%H:%M:%S", &timeinfo);
+    return String(buf);
+  }
+  return String(millis() / 1000) + "s";
+}
+
+String getDateTimeStr() {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    char buf[20];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    return String(buf);
+  }
+  return "";
+}
+
+void ensureDir(const char* dir) {
+  if (!LittleFS.exists(dir)) {
+    LittleFS.mkdir(dir);
+  }
+}
+
+// 保存传感器数据到 CSV
+void saveDataToFile() {
+  if (!littlefs_ok) return;
+  String date = getDateStr();
+  if (date.isEmpty()) return;
+
+  ensureDir("/data");
+  String path = "/data/" + date + ".csv";
+  bool isNew = !LittleFS.exists(path);
+  File f = LittleFS.open(path, "a");
+  if (!f) return;
+  if (isNew) {
+    f.println("time,temp,hum,lux,soil,eco2,tvoc");
+  }
+  f.printf("%s,%.1f,%.1f,%.0f,%d,%u,%u\n",
+    getTimeStr().c_str(), temp, hum, lux, soilPercent, eco2, tvoc);
+  f.close();
+}
+
+// 记录操作日志
+void logOperation(const String& action, const String& detail) {
+  if (!littlefs_ok) return;
+  String date = getDateStr();
+  if (date.isEmpty()) return;
+
+  ensureDir("/log");
+  String path = "/log/" + date + ".log";
+  File f = LittleFS.open(path, "a");
+  if (!f) return;
+  f.printf("[%s] %s: %s\n", getTimeStr().c_str(), action.c_str(), detail.c_str());
+  f.close();
+}
+
+// 自动清理过期文件
+void cleanOldFiles(const char* dir) {
+  if (!littlefs_ok) return;
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return;
+
+  // 计算截止日期（当前日期 - MAX_DATA_AGE_DAYS）
+  time_t now = mktime(&timeinfo);
+  time_t cutoff = now - (MAX_DATA_AGE_DAYS * 86400L);
+  struct tm cutTm;
+  localtime_r(&cutoff, &cutTm);
+  char cutStr[9];
+  strftime(cutStr, sizeof(cutStr), "%Y%m%d", &cutTm);
+  String cutDate = String(cutStr);
+
+  File root = LittleFS.open(dir);
+  if (!root || !root.isDirectory()) return;
+  File file = root.openNextFile();
+  while (file) {
+    String fname = String(file.name());
+    // 文件名格式: YYYYMMDD.csv 或 YYYYMMDD.log
+    if (fname.length() >= 8) {
+      String fileDate = fname.substring(0, 8);
+      if (fileDate < cutDate) {
+        String fullPath = String(dir) + "/" + fname;
+        LittleFS.remove(fullPath);
+        Serial.printf("🗑️ 已清理过期文件: %s\n", fullPath.c_str());
+      }
+    }
+    file = root.openNextFile();
+  }
+}
+
+// HTTP API: 获取指定日期的历史数据
+void handleApiHistory() {
+  if (!littlefs_ok) {
+    server.send(503, "application/json", "{\"error\":\"storage unavailable\"}");
+    return;
+  }
+  String date = server.arg("date");
+  if (date.length() != 8) {
+    // 默认返回今天
+    date = getDateStr();
+    if (date.isEmpty()) {
+      server.send(503, "application/json", "{\"error\":\"time not synced\"}");
+      return;
+    }
+  }
+  String path = "/data/" + date + ".csv";
+  if (!LittleFS.exists(path)) {
+    server.send(404, "application/json", "{\"error\":\"no data for this date\"}");
+    return;
+  }
+  File f = LittleFS.open(path, "r");
+  if (!f) {
+    server.send(500, "application/json", "{\"error\":\"read error\"}");
+    return;
+  }
+
+  DynamicJsonDocument doc(32768);
+  JsonArray timeArr = doc.createNestedArray("time");
+  JsonArray tempArr = doc.createNestedArray("temp");
+  JsonArray humArr  = doc.createNestedArray("hum");
+  JsonArray luxArr  = doc.createNestedArray("lux");
+  JsonArray soilArr = doc.createNestedArray("soil");
+  JsonArray eco2Arr = doc.createNestedArray("eco2");
+  JsonArray tvocArr = doc.createNestedArray("tvoc");
+  doc["date"] = date;
+
+  String line;
+  bool header = true;
+  while (f.available()) {
+    line = f.readStringUntil('\n');
+    line.trim();
+    if (line.isEmpty()) continue;
+    if (header) { header = false; continue; }  // 跳过 CSV 表头
+
+    // 解析 CSV: time,temp,hum,lux,soil,eco2,tvoc
+    int idx = 0;
+    String fields[7];
+    int start = 0;
+    for (int i = 0; i <= (int)line.length() && idx < 7; i++) {
+      if (i == (int)line.length() || line[i] == ',') {
+        fields[idx++] = line.substring(start, i);
+        start = i + 1;
+      }
+    }
+    if (idx >= 7) {
+      timeArr.add(fields[0]);
+      tempArr.add(fields[1].toFloat());
+      humArr.add(fields[2].toFloat());
+      luxArr.add(fields[3].toFloat());
+      soilArr.add(fields[4].toInt());
+      eco2Arr.add((uint16_t)fields[5].toInt());
+      tvocArr.add((uint16_t)fields[6].toInt());
+    }
+  }
+  f.close();
+
+  String output;
+  serializeJson(doc, output);
+  server.send(200, "application/json", output);
+}
+
+// HTTP API: 获取指定日期的操作日志
+void handleApiLog() {
+  if (!littlefs_ok) {
+    server.send(503, "application/json", "{\"error\":\"storage unavailable\"}");
+    return;
+  }
+  String date = server.arg("date");
+  if (date.length() != 8) date = getDateStr();
+  if (date.isEmpty()) {
+    server.send(503, "application/json", "{\"error\":\"time not synced\"}");
+    return;
+  }
+  String path = "/log/" + date + ".log";
+  if (!LittleFS.exists(path)) {
+    server.send(404, "application/json", "{\"error\":\"no log for this date\"}");
+    return;
+  }
+  File f = LittleFS.open(path, "r");
+  if (!f) {
+    server.send(500, "application/json", "{\"error\":\"read error\"}");
+    return;
+  }
+
+  DynamicJsonDocument doc(16384);
+  JsonArray entries = doc.createNestedArray("entries");
+  doc["date"] = date;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (!line.isEmpty()) entries.add(line);
+  }
+  f.close();
+
+  String output;
+  serializeJson(doc, output);
+  server.send(200, "application/json", output);
+}
+
+// HTTP API: 获取可用日期列表
+void handleApiDates() {
+  if (!littlefs_ok) {
+    server.send(503, "application/json", "{\"error\":\"storage unavailable\"}");
+    return;
+  }
+  DynamicJsonDocument doc(4096);
+  JsonArray dataArr = doc.createNestedArray("data_dates");
+  JsonArray logArr  = doc.createNestedArray("log_dates");
+
+  File dataDir = LittleFS.open("/data");
+  if (dataDir && dataDir.isDirectory()) {
+    File f = dataDir.openNextFile();
+    while (f) {
+      String name = String(f.name());
+      if (name.endsWith(".csv")) dataArr.add(name.substring(0, name.length() - 4));
+      f = dataDir.openNextFile();
+    }
+  }
+  File logDir = LittleFS.open("/log");
+  if (logDir && logDir.isDirectory()) {
+    File f = logDir.openNextFile();
+    while (f) {
+      String name = String(f.name());
+      if (name.endsWith(".log")) logArr.add(name.substring(0, name.length() - 4));
+      f = logDir.openNextFile();
+    }
+  }
+
+  // 存储状态
+  doc["total_bytes"] = LittleFS.totalBytes();
+  doc["used_bytes"]  = LittleFS.usedBytes();
+
+  String output;
+  serializeJson(doc, output);
+  server.send(200, "application/json", output);
 }
 
 void readSHT40() {
@@ -232,6 +490,10 @@ String buildJson() {
   system["cpu_freq"]  = ESP.getCpuFreqMHz();
   system["uptime"]    = (uint32_t)(millis() / 1000);
   system["psram"]     = has_psram;
+  if (littlefs_ok) {
+    system["fs_total"] = LittleFS.totalBytes();
+    system["fs_used"]  = LittleFS.usedBytes();
+  }
 
   // 传感器在线状态
   JsonObject sensors_status = doc.createNestedObject("sensors");
@@ -289,7 +551,9 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
       String action = doc["action"];
 
       if (action == "set_mode") {
+        bool wasAuto = autoMode;
         autoMode = (doc["mode"] == "auto");
+        logOperation("MODE", autoMode ? "切换为自动模式" : "切换为手动模式");
         handleAutoLogic();
       } 
       else if (action == "set_device" && !autoMode) {
@@ -300,6 +564,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
         else if (device == "heater") stateHeater = isOn;
         else if (device == "fan") stateFan = isOn;
         updateRelays();
+        logOperation("CTRL", device + (isOn ? " 开启" : " 关闭"));
       }
       else if (action == "set_sched") {
         sched.fan_en = doc["fan_en"];
@@ -308,6 +573,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
         sched.light_en = doc["light_en"];
         sched.light_start = doc["light_start"].as<String>();
         sched.light_end = doc["light_end"].as<String>();
+        logOperation("SCHED", "定时任务已更新");
         
         // 保存到 Preferences 持久化
         preferences.begin("sched", false);
@@ -413,6 +679,18 @@ void setup() {
     Serial.println("⚠️ PSRAM 不可用，使用内部 SRAM");
   }
 
+  // 初始化 LittleFS 文件系统
+  if (LittleFS.begin(true)) {
+    littlefs_ok = true;
+    Serial.printf("✅ LittleFS 已挂载 (总计 %u bytes, 已用 %u bytes)\n",
+      LittleFS.totalBytes(), LittleFS.usedBytes());
+    ensureDir("/data");
+    ensureDir("/log");
+  } else {
+    littlefs_ok = false;
+    Serial.println("⚠️ LittleFS 挂载失败，历史数据持久化不可用");
+  }
+
   // 初始化总线和传感器（全部带保护）
   Wire.begin(SDA_PIN, SCL_PIN);
 
@@ -485,6 +763,9 @@ void setup() {
     webSocket.onEvent(webSocketEvent);
     server.on("/", handleRootSTA);
     server.on("/reset", handleReset);
+    server.on("/api/history", handleApiHistory);
+    server.on("/api/log", handleApiLog);
+    server.on("/api/dates", handleApiDates);
   } else {
     setLED(255, 100, 0);
     WiFi.mode(WIFI_AP);
@@ -549,6 +830,22 @@ void loop() {
       } else {
         setLED(0, 255, 0);    // 绿色 = 正常
       } 
+    }
+
+    // 每5分钟持久化保存一次传感器数据
+    if (millis() - lastDataSave > DATA_SAVE_INTERVAL) {
+      lastDataSave = millis();
+      saveDataToFile();
+    }
+
+    // 每天凌晨清理过期文件（通过检查小时:分钟实现）
+    static uint8_t lastCleanDay = 255;
+    struct tm tInfo;
+    if (getLocalTime(&tInfo) && tInfo.tm_mday != lastCleanDay && tInfo.tm_hour == 3) {
+      lastCleanDay = tInfo.tm_mday;
+      cleanOldFiles("/data");
+      cleanOldFiles("/log");
+      logOperation("SYSTEM", "自动清理过期数据");
     }
   }
 }
