@@ -369,7 +369,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         socket = new WebSocket(gateway);
 
         socket.onopen = function() { setConnectionStatus('connected'); };
-        socket.onmessage = function(event) { updateUI(JSON.parse(event.data)); };
+        socket.onmessage = function(event) { try { updateUI(JSON.parse(event.data)); } catch(e) { console.warn('WebSocket parse error:', e); } };
         socket.onerror = function() { setConnectionStatus('disconnected'); };
         socket.onclose = function() {
           setConnectionStatus('disconnected');

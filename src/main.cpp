@@ -44,6 +44,10 @@ float temp = 0.0, hum = 0.0, lux = 0.0;
 int soilPercent = 0;
 uint16_t eco2 = 400, tvoc = 0;
 
+// --- SGP30 基准线管理 ---
+unsigned long lastBaselineSave = 0;
+#define BASELINE_SAVE_INTERVAL 3600000  // 每1小时保存一次基准线
+
 // --- 传感器在线状态 ---
 bool sensor_bh1750_ok = false;
 bool sensor_sht40_ok = false;
@@ -121,31 +125,39 @@ void handleAutoLogic() {
 
   struct tm timeinfo;
   String curTime = "";
+  bool timeValid = false;
   if (getLocalTime(&timeinfo)) {
     char buf[6];
     strftime(buf, sizeof(buf), "%H:%M", &timeinfo);
     curTime = String(buf);
+    timeValid = true;
   }
 
-  // 1. 传感器阈值逻辑
+  // 1. 传感器阈值逻辑（仅在传感器在线时生效）
   if (soilPercent < 30) statePump = true;
   else if (soilPercent > 60) statePump = false;
 
-  // 2. 定时调度逻辑 (会覆盖传感器逻辑，或者与传感器逻辑取 OR/AND)
-  // 补光灯：(光照不足 OR 定时开启)
-  bool lightBySensor = (lux < 200);
-  bool lightBySched = (sched.light_en && isTimeInRange(curTime, sched.light_start, sched.light_end));
+  // 2. 补光灯：(光照不足 OR 定时开启)
+  bool lightBySensor = sensor_bh1750_ok && (lux < 200);
+  bool lightBySched = timeValid && sched.light_en && isTimeInRange(curTime, sched.light_start, sched.light_end);
   stateLight = lightBySensor || lightBySched;
-  if (lux > 800 && !lightBySched) stateLight = false;
+  if (sensor_bh1750_ok && lux > 800 && !lightBySched) stateLight = false;
 
-  if (temp < 18.0) stateHeater = true;
-  else if (temp > 22.0) stateHeater = false;
+  // 3. 加热垫（仅在 SHT40 在线时生效）
+  if (sensor_sht40_ok) {
+    if (temp < 18.0) stateHeater = true;
+    else if (temp > 22.0) stateHeater = false;
+  }
 
-  // 风扇：(高温 OR 高CO2 OR 定时通风)
-  bool fanBySensor = (temp > 28.0 || eco2 > 1000);
-  bool fanBySched = (sched.fan_en && isTimeInRange(curTime, sched.fan_start, sched.fan_end));
-  stateFan = fanBySensor || fanBySched;
-  if (temp < 25.0 && eco2 < 800 && !fanBySched) stateFan = false;
+  // 4. 风扇：(高温 OR 高CO2 OR 定时通风)
+  bool fanBySensor = (sensor_sht40_ok && temp > 28.0) || (sensor_sgp30_ok && eco2 > 1000);
+  bool fanBySched = timeValid && sched.fan_en && isTimeInRange(curTime, sched.fan_start, sched.fan_end);
+  if (fanBySensor || fanBySched) {
+    stateFan = true;
+  } else if ((sensor_sht40_ok && temp < 25.0) && (sensor_sgp30_ok && eco2 < 800)) {
+    stateFan = false;
+  }
+  // 若传感器都不在线且无定时，保持当前状态
 
   updateRelays();
 }
@@ -161,21 +173,22 @@ void recordHistory() {
     tStr = String(millis() / 1000) + "s"; 
   }
 
-  int idx = (history_head + history_count) % HISTORY_SIZE;
+  int idx;
   if (history_count < HISTORY_SIZE) {
-    h_temp[history_count] = temp; h_hum[history_count] = hum;
-    h_lux[history_count] = lux; h_soil[history_count] = soilPercent;
-    h_eco2[history_count] = eco2; h_tvoc[history_count] = tvoc; // 👇 记录气象
-    h_time[history_count] = tStr;
+    idx = history_count;
     history_count++;
   } else {
-    h_temp[history_head] = temp; h_hum[history_head] = hum;
-    h_lux[history_head] = lux; h_soil[history_head] = soilPercent;
-    h_eco2[history_head] = eco2; h_tvoc[history_head] = tvoc;
-    h_time[history_head] = tStr;
+    idx = history_head;
     history_head = (history_head + 1) % HISTORY_SIZE;
   }
+  h_temp[idx] = temp; h_hum[idx] = hum;
+  h_lux[idx] = lux; h_soil[idx] = soilPercent;
+  h_eco2[idx] = eco2; h_tvoc[idx] = tvoc;
+  h_time[idx] = tStr;
 }
+
+// 预分配 JSON 缓冲区，减少堆碎片化
+static char jsonBuf[16384];
 
 String buildJson() {
   DynamicJsonDocument doc(16384); 
@@ -247,9 +260,8 @@ String buildJson() {
     tvoc_arr.add(h_tvoc[idx]);
   }
 
-  String jsonString;
-  serializeJson(doc, jsonString);
-  return jsonString;
+  size_t len = serializeJson(doc, jsonBuf, sizeof(jsonBuf));
+  return String(jsonBuf);
 }
 
 String buildStateJson() {
@@ -318,6 +330,17 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
 
 void handleRootSTA() { server.send_P(200, "text/html", index_html); }
 
+// HTML 实体转义，防止 XSS
+String htmlEscape(const String& raw) {
+  String out = raw;
+  out.replace("&", "&amp;");
+  out.replace("<", "&lt;");
+  out.replace(">", "&gt;");
+  out.replace("'", "&#39;");
+  out.replace("\"", "&quot;");
+  return out;
+}
+
 void handleRootAP() {
   String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
   html += "<title>WiFi设置</title><style>body{font-family:sans-serif;text-align:center;padding:20px;}";
@@ -326,7 +349,10 @@ void handleRootAP() {
   html += "<h1>🌱 大棚WiFi配置</h1><p>请选择WiFi并输入密码</p><form action='/save' method='POST'><select name='ssid'>";
   
   int n = WiFi.scanNetworks();
-  for (int i = 0; i < n; ++i) { html += "<option value='" + WiFi.SSID(i) + "'>" + WiFi.SSID(i) + " (" + String(WiFi.RSSI(i)) + "dBm)</option>"; }
+  for (int i = 0; i < n; ++i) {
+    String escaped = htmlEscape(WiFi.SSID(i));
+    html += "<option value='" + escaped + "'>" + escaped + " (" + String(WiFi.RSSI(i)) + "dBm)</option>";
+  }
   
   html += "</select><br><input type='password' name='pass' placeholder='WiFi密码'><br>";
   html += "<button type='submit'>保存并重启</button></form></body></html>";
@@ -334,15 +360,31 @@ void handleRootAP() {
 }
 
 void handleSave() {
+  String ssid = server.arg("ssid");
+  String pass = server.arg("pass");
+  // 输入校验
+  if (ssid.length() == 0 || ssid.length() > 32) {
+    server.send(400, "text/html", "<html><head><meta charset='UTF-8'></head><body><h2>SSID 无效（1-32字符）</h2></body></html>");
+    return;
+  }
+  if (pass.length() > 64) {
+    server.send(400, "text/html", "<html><head><meta charset='UTF-8'></head><body><h2>密码过长（最多64字符）</h2></body></html>");
+    return;
+  }
   preferences.begin("wifi-config", false);
-  preferences.putString("ssid", server.arg("ssid"));
-  preferences.putString("password", server.arg("pass"));
+  preferences.putString("ssid", ssid);
+  preferences.putString("password", pass);
   preferences.end();
   server.send(200, "text/html", "<html><head><meta charset='UTF-8'></head><body><h2>配置已保存！设备正在重启...</h2></body></html>");
   delay(2000); ESP.restart();
 }
 
 void handleReset() {
+  // 需要 confirm=yes 参数才执行，防止误触或未授权访问
+  if (server.arg("confirm") != "yes") {
+    server.send(200, "text/html", "<html><head><meta charset='UTF-8'></head><body><h2>确认重置？</h2><a href='/reset?confirm=yes'>点击确认清除WiFi配置并重启</a></body></html>");
+    return;
+  }
   preferences.begin("wifi-config", false);
   preferences.clear();
   preferences.end();
@@ -389,6 +431,17 @@ void setup() {
   if (sgp.begin()) {
     sensor_sgp30_ok = true;
     Serial.println("✅ SGP30 传感器初始化成功");
+    // 恢复上次保存的基准线
+    preferences.begin("sgp30", true);
+    uint16_t bl_eco2 = preferences.getUShort("eco2", 0);
+    uint16_t bl_tvoc = preferences.getUShort("tvoc", 0);
+    preferences.end();
+    if (bl_eco2 != 0 && bl_tvoc != 0) {
+      sgp.setIAQBaseline(bl_eco2, bl_tvoc);
+      Serial.printf("✅ SGP30 基准线已恢复: eCO2=%u, TVOC=%u\n", bl_eco2, bl_tvoc);
+    } else {
+      Serial.println("ℹ️ SGP30 无历史基准线，需要12小时校准期");
+    }
   } else {
     sensor_sgp30_ok = false;
     Serial.println("⚠️ SGP30 未连接，空气质量数据将不可用");
@@ -456,6 +509,19 @@ void loop() {
       if (sgp.IAQmeasure()) {
         eco2 = sgp.eCO2;
         tvoc = sgp.TVOC;
+      }
+    }
+
+    // 定期保存 SGP30 基准线（每1小时）
+    if (sensor_sgp30_ok && millis() - lastBaselineSave > BASELINE_SAVE_INTERVAL) {
+      lastBaselineSave = millis();
+      uint16_t bl_eco2, bl_tvoc;
+      if (sgp.getIAQBaseline(&bl_eco2, &bl_tvoc)) {
+        preferences.begin("sgp30", false);
+        preferences.putUShort("eco2", bl_eco2);
+        preferences.putUShort("tvoc", bl_tvoc);
+        preferences.end();
+        Serial.printf("💾 SGP30 基准线已保存: eCO2=%u, TVOC=%u\n", bl_eco2, bl_tvoc);
       }
     }
 
