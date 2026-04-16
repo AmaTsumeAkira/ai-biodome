@@ -60,6 +60,9 @@ bool littlefs_ok = false;
 unsigned long lastDataSave = 0;
 unsigned int dataSaveInterval = DEFAULT_SAVE_INTERVAL;  // 秒，用户可配置
 
+// --- AI 大模型配置 (MiniMax) ---
+String aiApiKey = "";  // 用户在网页配置
+
 // --- QQ Bot 配置 ---
 struct QQBotConfig {
   String appId;
@@ -753,6 +756,75 @@ void handleApiQQBotTest() {
     ok ? "{\"ok\":true}" : "{\"error\":\"发送失败\"}");
 }
 
+// --- AI 大模型调用 (MiniMax M2-her) ---
+String callMiniMaxAI(const String& systemPrompt, const String& userMsg) {
+  if (aiApiKey.isEmpty()) return "[AI 未配置] 请先在系统设置中输入 MiniMax API Key";
+
+  HTTPClient http;
+  http.begin("https://api.minimaxi.com/v1/text/chatcompletion_v2");
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", "Bearer " + aiApiKey);
+  http.setTimeout(30000);
+
+  DynamicJsonDocument reqDoc(2048);
+  reqDoc["model"] = "M2-her";
+  JsonArray msgs = reqDoc.createNestedArray("messages");
+
+  JsonObject sysMsg = msgs.createNestedObject();
+  sysMsg["role"] = "system";
+  sysMsg["name"] = "AI\u5927\u68DA\u52A9\u624B";
+  sysMsg["content"] = systemPrompt;
+
+  JsonObject usrMsg = msgs.createNestedObject();
+  usrMsg["role"] = "user";
+  usrMsg["name"] = "\u7528\u6237";
+  usrMsg["content"] = userMsg;
+
+  String body;
+  serializeJson(reqDoc, body);
+  int code = http.POST(body);
+  String result = "";
+
+  if (code == 200) {
+    String resp = http.getString();
+    DynamicJsonDocument respDoc(4096);
+    DeserializationError err = deserializeJson(respDoc, resp);
+    if (!err && respDoc.containsKey("choices")) {
+      result = respDoc["choices"][0]["message"]["content"].as<String>();
+    } else {
+      result = "[AI 响应解析失败]";
+    }
+  } else {
+    result = "[AI 请求失败] HTTP " + String(code);
+    if (code > 0) {
+      String errBody = http.getString();
+      if (errBody.length() > 0 && errBody.length() < 200) result += ": " + errBody;
+    }
+  }
+  http.end();
+  return result;
+}
+
+// HTTP API: AI Key 配置 (GET/POST)
+void handleApiAIConfig() {
+  if (server.method() == HTTP_POST) {
+    DynamicJsonDocument doc(256);
+    deserializeJson(doc, server.arg("plain"));
+    if (doc.containsKey("apiKey")) {
+      String key = doc["apiKey"].as<String>();
+      if (!key.isEmpty()) {
+        aiApiKey = key;
+        preferences.begin("ai", false);
+        preferences.putString("apiKey", aiApiKey);
+        preferences.end();
+        Serial.println("🧠 AI API Key 已更新");
+      }
+    }
+  }
+  String resp = "{\"configured\":" + String(aiApiKey.isEmpty() ? "false" : "true") + "}";
+  server.send(200, "application/json", resp);
+}
+
 // HTTP API: 记录粒度设置 (GET/POST)
 void handleApiSaveInterval() {
   if (server.method() == HTTP_POST) {
@@ -1208,6 +1280,30 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
 
         handleAutoLogic();
       }
+      else if (action == "ai_analyze") {
+        // 环境分析：用当前传感器数据生成分析报告
+        String sysPrompt = "\u4F60\u662F\u667A\u6167\u5927\u68DA\u7684 AI \u52A9\u624B\u3002\u6839\u636E\u4F20\u611F\u5668\u6570\u636E\u5206\u6790\u5F53\u524D\u73AF\u5883\u72B6\u6001\uFF0C\u8BC4\u4F30\u690D\u7269\u751F\u957F\u6761\u4EF6\uFF0C\u7ED9\u51FA\u5177\u4F53\u53EF\u64CD\u4F5C\u7684\u5EFA\u8BAE\u3002\u56DE\u7B54\u7B80\u6D01\uFF0C200\u5B57\u4EE5\u5185\u3002";
+        String userQ = "\u5F53\u524D\u73AF\u5883:\n\u6E29\u5EA6:" + String(temp, 1) + "\u00B0C, \u6E7F\u5EA6:" + String(hum, 1) + "%, \u5149\u7167:" + String(lux, 0) + "lx, \u571F\u58E4\u6C34\u5206:" + String(soilPercent) + "%, eCO2:" + String(eco2) + "ppm, TVOC:" + String(tvoc) + "ppb\n\u8BBE\u5907:\u6C34\u6CF5=" + (statePump?"ON":"OFF") + ", \u8865\u5149=" + (stateLight?"ON":"OFF") + ", \u52A0\u70ED=" + (stateHeater?"ON":"OFF") + ", \u98CE\u6247=" + (stateFan?"ON":"OFF") + "\n\u6A21\u5F0F:" + (autoMode?"\u81EA\u52A8":"\u624B\u52A8") + "\n\u8BF7\u5206\u6790\u73AF\u5883\u72B6\u6001\u5E76\u7ED9\u51FA\u5EFA\u8BAE\u3002";
+        String aiReply = callMiniMaxAI(sysPrompt, userQ);
+        DynamicJsonDocument respDoc(4096);
+        respDoc["ai_resp"] = aiReply;
+        String respStr;
+        serializeJson(respDoc, respStr);
+        webSocket.sendTXT(num, respStr);
+      }
+      else if (action == "ai_chat") {
+        // 自由对话
+        String question = doc["question"].as<String>();
+        if (!question.isEmpty()) {
+          String sysPrompt = "\u4F60\u662F\u667A\u6167\u5927\u68DA\u7684 AI \u52A9\u624B\u3002\u5F53\u524D\u73AF\u5883:\u6E29\u5EA6" + String(temp, 1) + "\u00B0C,\u6E7F\u5EA6" + String(hum, 1) + "%,\u5149\u7167" + String(lux, 0) + "lx,\u571F\u58E4" + String(soilPercent) + "%,eCO2:" + String(eco2) + "ppm,TVOC:" + String(tvoc) + "ppb\u3002\u56DE\u7B54\u7B80\u6D01\u5B9E\u7528\uFF0C200\u5B57\u4EE5\u5185\u3002";
+          String aiReply = callMiniMaxAI(sysPrompt, question);
+          DynamicJsonDocument respDoc(4096);
+          respDoc["ai_resp"] = aiReply;
+          String respStr;
+          serializeJson(respDoc, respStr);
+          webSocket.sendTXT(num, respStr);
+        }
+      }
       
       String stateStr = buildStateJson();
       webSocket.broadcastTXT(stateStr);
@@ -1364,6 +1460,12 @@ void setup() {
   preferences.end();
   Serial.printf("📊 数据记录间隔: %u 秒\n", dataSaveInterval);
 
+  // 加载 AI API Key
+  preferences.begin("ai", true);
+  aiApiKey = preferences.getString("apiKey", "");
+  preferences.end();
+  if (!aiApiKey.isEmpty()) Serial.println("🧠 AI API Key 已配置");
+
   // 加载 QQ Bot 配置
   preferences.begin("qqbot", true);
   qqbot.appId = preferences.getString("appId", "");
@@ -1410,6 +1512,7 @@ void setup() {
     server.on("/api/dates", handleApiDates);
     server.on("/api/interval", handleApiSaveInterval);
     server.on("/api/export", handleApiExport);
+    server.on("/api/ai/config", handleApiAIConfig);
     server.on("/api/qqbot/config", handleApiQQBotConfig);
     server.on("/api/qqbot/test", handleApiQQBotTest);
 

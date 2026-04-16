@@ -481,6 +481,20 @@ body{font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;backgroun
       <div class="text-sm font-bold text-gray-800" id="val-sdk">--</div>
     </div>
   </div>
+  <div class="card mt-6">
+    <div class="flex items-center gap-3 mb-3">
+      <span class="text-xl">&#x1F9E0;</span>
+      <div>
+        <h3 class="font-bold text-gray-800 text-sm">AI &#x5927;&#x6A21;&#x578B;&#x914D;&#x7F6E;</h3>
+        <span class="text-xs" id="ai-config-status" style="color:#9ca3af">&#x672A;&#x914D;&#x7F6E;</span>
+      </div>
+    </div>
+    <div class="flex flex-wrap items-center gap-3">
+      <input type="password" id="ai-api-key" placeholder="MiniMax API Key" class="flex-1 min-w-[200px] px-3 py-2 text-sm rounded-lg border focus:ring-2 focus:ring-blue-400 outline-none">
+      <button onclick="saveAIConfig()" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">&#x4FDD;&#x5B58;</button>
+    </div>
+    <p class="text-xs text-gray-400 mt-2">&#x4F7F;&#x7528; MiniMax M2-her &#x6A21;&#x578B;&#xFF0C;&#x8BF7;&#x5728; <a href="https://platform.minimaxi.com" target="_blank" class="text-blue-500 underline">platform.minimaxi.com</a> &#x83B7;&#x53D6; API Key</p>
+  </div>
 </div>
 </div>
 <script>
@@ -856,6 +870,21 @@ body{font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;backgroun
     }).catch(function(){});
   }
   setTimeout(loadQQBotConfig,3000);
+  // 加载 AI 配置状态
+  fetch('/api/ai/config').then(function(r){return r.json();}).then(function(d){
+    var st=document.getElementById('ai-config-status');
+    if(st){st.innerText=d.configured?'\u5DF2\u914D\u7F6E':'\u672A\u914D\u7F6E';st.style.color=d.configured?'#16a34a':'#9ca3af';}
+  }).catch(function(){});
+  window.saveAIConfig=function(){
+    var key=document.getElementById('ai-api-key').value;
+    if(!key){alert('\u8BF7\u8F93\u5165 API Key');return;}
+    fetch('/api/ai/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apiKey:key})}).then(function(r){return r.json();}).then(function(d){
+      alert('AI API Key \u5DF2\u4FDD\u5B58');
+      var st=document.getElementById('ai-config-status');
+      if(st){st.innerText='\u5DF2\u914D\u7F6E';st.style.color='#16a34a';}
+      document.getElementById('ai-api-key').value='';
+    }).catch(function(e){alert('\u4FDD\u5B58\u5931\u8D25: '+e.message);});
+  };
   setInterval(loadQQBotConfig,15000);
   window.saveQQBotConfig=function(){
     var body={appId:document.getElementById('qqbot-appid').value,userOpenId:document.getElementById('qqbot-groupid').value,enabled:document.getElementById('qqbot-enabled').checked};
