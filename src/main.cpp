@@ -97,6 +97,11 @@ struct AIRequest {
   String userMessage;
   bool pending = false;
 } aiRequest;
+struct AIResponse {
+  uint8_t clientNum;
+  String payload;
+  bool ready = false;
+} aiResponse;
 SemaphoreHandle_t aiMutex = NULL;
 
 // --- 传感器在线状态 ---
@@ -846,7 +851,21 @@ void aiTaskFunc(void* param) {
         respDoc["ai_resp"] = aiReply;
         String respStr;
         serializeJson(respDoc, respStr);
-        webSocket.sendTXT(clientNum, respStr);
+
+        // 将结果放入响应缓冲，由主循环发送（WebSocket 非线程安全）
+        while (true) {
+          if (xSemaphoreTake(aiMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            if (!aiResponse.ready) {
+              aiResponse.clientNum = clientNum;
+              aiResponse.payload = respStr;
+              aiResponse.ready = true;
+              xSemaphoreGive(aiMutex);
+              break;
+            }
+            xSemaphoreGive(aiMutex);
+          }
+          vTaskDelay(pdMS_TO_TICKS(50));
+        }
       } else {
         xSemaphoreGive(aiMutex);
       }
@@ -1613,6 +1632,16 @@ void loop() {
   
   if (WiFi.status() == WL_CONNECTED) {
     webSocket.loop(); 
+
+    // 检查 AI 异步任务是否有待发送的响应
+    if (xSemaphoreTake(aiMutex, 0) == pdTRUE) {
+      if (aiResponse.ready) {
+        webSocket.sendTXT(aiResponse.clientNum, aiResponse.payload);
+        aiResponse.payload = "";
+        aiResponse.ready = false;
+      }
+      xSemaphoreGive(aiMutex);
+    }
 
     // QQ Gateway WebSocket 循环
     if (qqbot.enabled) {
