@@ -789,8 +789,10 @@ void handleApiQQBotTest() {
 String callMiniMaxAI(const String& systemPrompt, const String& userMsg) {
   if (aiApiKey.isEmpty()) return "[AI 未配置] 请先在系统设置中输入 MiniMax API Key";
 
+  WiFiClientSecure client;
+  client.setInsecure();
   HTTPClient http;
-  http.begin("https://api.minimaxi.com/v1/text/chatcompletion_v2");
+  http.begin(client, "https://api.minimaxi.com/v1/text/chatcompletion_v2");
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", "Bearer " + aiApiKey);
   http.setTimeout(30000);
@@ -877,7 +879,10 @@ void aiTaskFunc(void* param) {
 void handleApiAIConfig() {
   if (server.method() == HTTP_POST) {
     DynamicJsonDocument doc(256);
-    deserializeJson(doc, server.arg("plain"));
+    if (deserializeJson(doc, server.arg("plain"))) {
+      server.send(400, "application/json", "{\"error\":\"无效 JSON\"}");
+      return;
+    }
     if (doc.containsKey("apiKey")) {
       String key = doc["apiKey"].as<String>();
       if (!key.isEmpty()) {
