@@ -13,6 +13,8 @@
 #include <LittleFS.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <vector>
+#include <algorithm>
 #include <WebSocketsClient.h>
 
 #include "webpage.h"
@@ -87,6 +89,15 @@ int qqGwLastSeq = -1;
 String qqGwSessionId = "";
 unsigned long qqGwReconnectAt = 0;
 #define QQ_GW_RECONNECT_DELAY 10000
+
+// --- AI 异步请求 ---
+struct AIRequest {
+  uint8_t clientNum;
+  String systemPrompt;
+  String userMessage;
+  bool pending = false;
+} aiRequest;
+SemaphoreHandle_t aiMutex = NULL;
 
 // --- 传感器在线状态 ---
 bool sensor_bh1750_ok = false;
@@ -285,6 +296,15 @@ void ensureDir(const char* dir) {
   if (!LittleFS.exists(dir)) {
     LittleFS.mkdir(dir);
   }
+}
+
+// 校验日期字符串是否为8位纯数字
+bool isValidDateStr(const String& d) {
+  if (d.length() != 8) return false;
+  for (unsigned int i = 0; i < d.length(); i++) {
+    if (d[i] < '0' || d[i] > '9') return false;
+  }
+  return true;
 }
 
 // 保存传感器数据到 CSV
@@ -699,7 +719,11 @@ void disconnectQQGateway() {
 void handleApiQQBotConfig() {
   if (server.method() == HTTP_POST) {
     DynamicJsonDocument doc(512);
-    deserializeJson(doc, server.arg("plain"));
+    DeserializationError err = deserializeJson(doc, server.arg("plain"));
+    if (err) {
+      server.send(400, "application/json", "{\"error\":\"invalid JSON\"}");
+      return;
+    }
     qqbot.appId = doc["appId"].as<String>();
     if (doc.containsKey("appSecret") && doc["appSecret"].as<String>().length() > 0) {
       qqbot.appSecret = doc["appSecret"].as<String>();
@@ -756,7 +780,7 @@ void handleApiQQBotTest() {
     ok ? "{\"ok\":true}" : "{\"error\":\"发送失败\"}");
 }
 
-// --- AI 大模型调用 (MiniMax M2-her) ---
+// --- AI 大模型调用 (MiniMax-M2.7) ---
 String callMiniMaxAI(const String& systemPrompt, const String& userMsg) {
   if (aiApiKey.isEmpty()) return "[AI 未配置] 请先在系统设置中输入 MiniMax API Key";
 
@@ -767,7 +791,7 @@ String callMiniMaxAI(const String& systemPrompt, const String& userMsg) {
   http.setTimeout(30000);
 
   DynamicJsonDocument reqDoc(2048);
-  reqDoc["model"] = "M2-her";
+  reqDoc["model"] = "MiniMax-M2.7";
   JsonArray msgs = reqDoc.createNestedArray("messages");
 
   JsonObject sysMsg = msgs.createNestedObject();
@@ -803,6 +827,31 @@ String callMiniMaxAI(const String& systemPrompt, const String& userMsg) {
   }
   http.end();
   return result;
+}
+
+// AI 异步任务（运行在独立 FreeRTOS 核心上，不阻塞主循环）
+void aiTaskFunc(void* param) {
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+    if (xSemaphoreTake(aiMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      if (aiRequest.pending) {
+        uint8_t clientNum = aiRequest.clientNum;
+        String sysPrompt = aiRequest.systemPrompt;
+        String userMsg = aiRequest.userMessage;
+        aiRequest.pending = false;
+        xSemaphoreGive(aiMutex);
+
+        String aiReply = callMiniMaxAI(sysPrompt, userMsg);
+        DynamicJsonDocument respDoc(4096);
+        respDoc["ai_resp"] = aiReply;
+        String respStr;
+        serializeJson(respDoc, respStr);
+        webSocket.sendTXT(clientNum, respStr);
+      } else {
+        xSemaphoreGive(aiMutex);
+      }
+    }
+  }
 }
 
 // HTTP API: AI Key 配置 (GET/POST)
@@ -854,18 +903,15 @@ void handleApiExport() {
   }
   String startDate = server.arg("start");
   String endDate = server.arg("end");
-  if (startDate.length() != 8) startDate = getDateStr();
-  if (endDate.length() != 8) endDate = startDate;
+  if (!isValidDateStr(startDate)) startDate = getDateStr();
+  if (!isValidDateStr(endDate)) endDate = startDate;
   if (startDate.isEmpty()) {
     server.send(503, "text/plain", "time not synced");
     return;
   }
 
-  // 收集日期范围内的所有 CSV 文件
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/csv", "");
-  server.sendContent("date,time,temp,hum,lux,soil,eco2,tvoc\n");
-
+  // 先收集日期范围内的文件名并排序
+  std::vector<String> fileNames;
   File root = LittleFS.open("/data");
   if (root && root.isDirectory()) {
     File file = root.openNextFile();
@@ -874,20 +920,33 @@ void handleApiExport() {
       if (fname.endsWith(".csv") && fname.length() >= 12) {
         String fdate = fname.substring(0, 8);
         if (fdate >= startDate && fdate <= endDate) {
-          String dateFormatted = fdate.substring(0,4) + "-" + fdate.substring(4,6) + "-" + fdate.substring(6,8);
-          // 跳过 CSV 头行，逐行发送并附加日期列
-          bool firstLine = true;
-          while (file.available()) {
-            String line = file.readStringUntil('\n');
-            line.trim();
-            if (line.isEmpty()) continue;
-            if (firstLine) { firstLine = false; continue; }  // 跳过 header
-            server.sendContent(dateFormatted + "," + line + "\n");
-          }
+          fileNames.push_back(fname);
         }
       }
       file = root.openNextFile();
     }
+  }
+  std::sort(fileNames.begin(), fileNames.end());
+
+  // 按日期顺序发送 CSV
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/csv", "");
+  server.sendContent("date,time,temp,hum,lux,soil,eco2,tvoc\n");
+
+  for (const auto& fname : fileNames) {
+    String fdate = fname.substring(0, 8);
+    String dateFormatted = fdate.substring(0,4) + "-" + fdate.substring(4,6) + "-" + fdate.substring(6,8);
+    File file = LittleFS.open("/data/" + fname, "r");
+    if (!file) continue;
+    bool firstLine = true;
+    while (file.available()) {
+      String line = file.readStringUntil('\n');
+      line.trim();
+      if (line.isEmpty()) continue;
+      if (firstLine) { firstLine = false; continue; }  // 跳过 header
+      server.sendContent(dateFormatted + "," + line + "\n");
+    }
+    file.close();
   }
   server.sendContent("");  // 结束 chunked
 }
@@ -899,7 +958,7 @@ void handleApiHistory() {
     return;
   }
   String date = server.arg("date");
-  if (date.length() != 8) {
+  if (!isValidDateStr(date)) {
     // 默认返回今天
     date = getDateStr();
     if (date.isEmpty()) {
@@ -918,7 +977,11 @@ void handleApiHistory() {
     return;
   }
 
-  DynamicJsonDocument doc(32768);
+  // 根据文件大小动态分配 JSON 缓冲区（约 4 倍 CSV 大小）
+  size_t fileSize = f.size();
+  size_t docSize = max((size_t)32768, fileSize * 4);
+  if (docSize > 262144) docSize = 262144;  // 上限 256KB（PSRAM 安全范围）
+  DynamicJsonDocument doc(docSize);
   JsonArray timeArr = doc.createNestedArray("time");
   JsonArray tempArr = doc.createNestedArray("temp");
   JsonArray humArr  = doc.createNestedArray("hum");
@@ -970,7 +1033,7 @@ void handleApiLog() {
     return;
   }
   String date = server.arg("date");
-  if (date.length() != 8) date = getDateStr();
+  if (!isValidDateStr(date)) date = getDateStr();
   if (date.isEmpty()) {
     server.send(503, "application/json", "{\"error\":\"time not synced\"}");
     return;
@@ -1281,28 +1344,37 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
         handleAutoLogic();
       }
       else if (action == "ai_analyze") {
-        // 环境分析：用当前传感器数据生成分析报告
-        String sysPrompt = "\u4F60\u662F\u667A\u6167\u5927\u68DA\u7684 AI \u52A9\u624B\u3002\u6839\u636E\u4F20\u611F\u5668\u6570\u636E\u5206\u6790\u5F53\u524D\u73AF\u5883\u72B6\u6001\uFF0C\u8BC4\u4F30\u690D\u7269\u751F\u957F\u6761\u4EF6\uFF0C\u7ED9\u51FA\u5177\u4F53\u53EF\u64CD\u4F5C\u7684\u5EFA\u8BAE\u3002\u56DE\u7B54\u7B80\u6D01\uFF0C200\u5B57\u4EE5\u5185\u3002";
-        String userQ = "\u5F53\u524D\u73AF\u5883:\n\u6E29\u5EA6:" + String(temp, 1) + "\u00B0C, \u6E7F\u5EA6:" + String(hum, 1) + "%, \u5149\u7167:" + String(lux, 0) + "lx, \u571F\u58E4\u6C34\u5206:" + String(soilPercent) + "%, eCO2:" + String(eco2) + "ppm, TVOC:" + String(tvoc) + "ppb\n\u8BBE\u5907:\u6C34\u6CF5=" + (statePump?"ON":"OFF") + ", \u8865\u5149=" + (stateLight?"ON":"OFF") + ", \u52A0\u70ED=" + (stateHeater?"ON":"OFF") + ", \u98CE\u6247=" + (stateFan?"ON":"OFF") + "\n\u6A21\u5F0F:" + (autoMode?"\u81EA\u52A8":"\u624B\u52A8") + "\n\u8BF7\u5206\u6790\u73AF\u5883\u72B6\u6001\u5E76\u7ED9\u51FA\u5EFA\u8BAE\u3002";
-        String aiReply = callMiniMaxAI(sysPrompt, userQ);
-        DynamicJsonDocument respDoc(4096);
-        respDoc["ai_resp"] = aiReply;
-        String respStr;
-        serializeJson(respDoc, respStr);
-        webSocket.sendTXT(num, respStr);
+        // 环境分析：异步调用 AI（不阻塞主循环）
+        if (xSemaphoreTake(aiMutex, 0) == pdTRUE) {
+          if (!aiRequest.pending) {
+            aiRequest.clientNum = num;
+            aiRequest.systemPrompt = "\u4F60\u662F\u667A\u6167\u5927\u68DA\u7684 AI \u52A9\u624B\u3002\u6839\u636E\u4F20\u611F\u5668\u6570\u636E\u5206\u6790\u5F53\u524D\u73AF\u5883\u72B6\u6001\uFF0C\u8BC4\u4F30\u690D\u7269\u751F\u957F\u6761\u4EF6\uFF0C\u7ED9\u51FA\u5177\u4F53\u53EF\u64CD\u4F5C\u7684\u5EFA\u8BAE\u3002\u56DE\u7B54\u7B80\u6D01\uFF0C200\u5B57\u4EE5\u5185\u3002";
+            aiRequest.userMessage = "\u5F53\u524D\u73AF\u5883:\n\u6E29\u5EA6:" + String(temp, 1) + "\u00B0C, \u6E7F\u5EA6:" + String(hum, 1) + "%, \u5149\u7167:" + String(lux, 0) + "lx, \u571F\u58E4\u6C34\u5206:" + String(soilPercent) + "%, eCO2:" + String(eco2) + "ppm, TVOC:" + String(tvoc) + "ppb\n\u8BBE\u5907:\u6C34\u6CF5=" + (statePump?"ON":"OFF") + ", \u8865\u5149=" + (stateLight?"ON":"OFF") + ", \u52A0\u70ED=" + (stateHeater?"ON":"OFF") + ", \u98CE\u6247=" + (stateFan?"ON":"OFF") + "\n\u6A21\u5F0F:" + (autoMode?"\u81EA\u52A8":"\u624B\u52A8") + "\n\u8BF7\u5206\u6790\u73AF\u5883\u72B6\u6001\u5E76\u7ED9\u51FA\u5EFA\u8BAE\u3002";
+            aiRequest.pending = true;
+          } else {
+            webSocket.sendTXT(num, "{\"ai_resp\":\"AI \u6B63\u5728\u5904\u7406\u4E0A\u4E00\u4E2A\u8BF7\u6C42\uFF0C\u8BF7\u7A0D\u5019...\"}");
+          }
+          xSemaphoreGive(aiMutex);
+        }
+        return;  // AI 请求不需要广播状态
       }
       else if (action == "ai_chat") {
-        // 自由对话
+        // 自由对话：异步调用 AI
         String question = doc["question"].as<String>();
         if (!question.isEmpty()) {
-          String sysPrompt = "\u4F60\u662F\u667A\u6167\u5927\u68DA\u7684 AI \u52A9\u624B\u3002\u5F53\u524D\u73AF\u5883:\u6E29\u5EA6" + String(temp, 1) + "\u00B0C,\u6E7F\u5EA6" + String(hum, 1) + "%,\u5149\u7167" + String(lux, 0) + "lx,\u571F\u58E4" + String(soilPercent) + "%,eCO2:" + String(eco2) + "ppm,TVOC:" + String(tvoc) + "ppb\u3002\u56DE\u7B54\u7B80\u6D01\u5B9E\u7528\uFF0C200\u5B57\u4EE5\u5185\u3002";
-          String aiReply = callMiniMaxAI(sysPrompt, question);
-          DynamicJsonDocument respDoc(4096);
-          respDoc["ai_resp"] = aiReply;
-          String respStr;
-          serializeJson(respDoc, respStr);
-          webSocket.sendTXT(num, respStr);
+          if (xSemaphoreTake(aiMutex, 0) == pdTRUE) {
+            if (!aiRequest.pending) {
+              aiRequest.clientNum = num;
+              aiRequest.systemPrompt = "\u4F60\u662F\u667A\u6167\u5927\u68DA\u7684 AI \u52A9\u624B\u3002\u5F53\u524D\u73AF\u5883:\u6E29\u5EA6" + String(temp, 1) + "\u00B0C,\u6E7F\u5EA6" + String(hum, 1) + "%,\u5149\u7167" + String(lux, 0) + "lx,\u571F\u58E4" + String(soilPercent) + "%,eCO2:" + String(eco2) + "ppm,TVOC:" + String(tvoc) + "ppb\u3002\u56DE\u7B54\u7B80\u6D01\u5B9E\u7528\uFF0C200\u5B57\u4EE5\u5185\u3002";
+              aiRequest.userMessage = question;
+              aiRequest.pending = true;
+            } else {
+              webSocket.sendTXT(num, "{\"ai_resp\":\"AI \u6B63\u5728\u5904\u7406\u4E0A\u4E00\u4E2A\u8BF7\u6C42\uFF0C\u8BF7\u7A0D\u5019...\"}");
+            }
+            xSemaphoreGive(aiMutex);
+          }
         }
+        return;  // AI 请求不需要广播状态
       }
       
       String stateStr = buildStateJson();
@@ -1465,6 +1537,11 @@ void setup() {
   aiApiKey = preferences.getString("apiKey", "");
   preferences.end();
   if (!aiApiKey.isEmpty()) Serial.println("🧠 AI API Key 已配置");
+
+  // 初始化 AI 异步任务
+  aiMutex = xSemaphoreCreateMutex();
+  xTaskCreatePinnedToCore(aiTaskFunc, "AI_Task", 8192, NULL, 1, NULL, 0);  // Core0，低优先级
+  Serial.println("🧠 AI 异步任务已启动");
 
   // 加载 QQ Bot 配置
   preferences.begin("qqbot", true);

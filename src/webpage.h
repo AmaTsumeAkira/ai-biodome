@@ -493,7 +493,7 @@ body{font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;backgroun
       <input type="password" id="ai-api-key" placeholder="MiniMax API Key" class="flex-1 min-w-[200px] px-3 py-2 text-sm rounded-lg border focus:ring-2 focus:ring-blue-400 outline-none">
       <button onclick="saveAIConfig()" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">&#x4FDD;&#x5B58;</button>
     </div>
-    <p class="text-xs text-gray-400 mt-2">&#x4F7F;&#x7528; MiniMax M2-her &#x6A21;&#x578B;&#xFF0C;&#x8BF7;&#x5728; <a href="https://platform.minimaxi.com" target="_blank" class="text-blue-500 underline">platform.minimaxi.com</a> &#x83B7;&#x53D6; API Key</p>
+    <p class="text-xs text-gray-400 mt-2">&#x4F7F;&#x7528; MiniMax-M2.7 &#x6A21;&#x578B;&#xFF0C;&#x8BF7;&#x5728; <a href="https://platform.minimaxi.com" target="_blank" class="text-blue-500 underline">platform.minimaxi.com</a> &#x83B7;&#x53D6; API Key</p>
   </div>
 </div>
 </div>
