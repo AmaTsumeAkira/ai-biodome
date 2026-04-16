@@ -765,7 +765,7 @@ body{font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;backgroun
       document.getElementById('hist-log-wrap').style.display='';
       var list=document.getElementById('hist-log-list');
       if(!data.entries||data.entries.length===0){list.innerHTML='<div class="text-gray-400">\u5F53\u65E5\u65E0\u8BB0\u5F55</div>';}
-      else{list.innerHTML=data.entries.map(function(e){return'<div class="py-1 border-b border-slate-200">'+e.replace(/</g,'&lt;')+'</div>';}).join('');}
+      else{list.innerHTML=data.entries.map(function(e){return'<div class="py-1 border-b border-slate-200">'+e.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>';}).join('');}
     }).catch(function(e){alert('\u67E5\u8BE2\u5931\u8D25: '+e.message);});
   };
 
@@ -812,7 +812,7 @@ body{font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;backgroun
       alert(d.ok?'\u6D4B\u8BD5\u6D88\u606F\u53D1\u9001\u6210\u529F\uFF01':('\u5931\u8D25: '+(d.error||'\u672A\u77E5\u9519\u8BEF')));
     }).catch(function(e){alert('\u8BF7\u6C42\u5931\u8D25: '+e.message);});
   };
-  window.addEventListener('resize',function(){chartTH.resize();chartLS.resize();chartAQ.resize();});
+  window.addEventListener('resize',function(){chartTH.resize();chartLS.resize();chartAQ.resize();if(histChartTH){histChartTH.resize();histChartLS.resize();histChartAQ.resize();}});
 })();
 </script>
 </body>
