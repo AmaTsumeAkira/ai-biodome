@@ -1402,7 +1402,10 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
   }
 }
 
-void handleRootSTA() { server.send_P(200, "text/html", index_html); }
+void handleRootSTA() {
+  server.sendHeader("Content-Encoding", "gzip");
+  server.send_P(200, "text/html", (const char*)index_html_gz, index_html_gz_len);
+}
 
 // HTML 实体转义，防止 XSS
 String htmlEscape(const String& raw) {
