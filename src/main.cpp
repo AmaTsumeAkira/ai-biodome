@@ -67,7 +67,8 @@ struct QQBotConfig {
 } qqbot;
 
 String qqbotAccessToken = "";
-unsigned long qqbotTokenExpiry = 0;
+unsigned long qqbotTokenExpiry = 0;  // Token 有效时长 ms
+unsigned long qqbotTokenObtainedAt = 0;  // Token 获取时刻
 unsigned long lastQQBotAlert = 0;
 #define QQBOT_ALERT_INTERVAL 1800000  // 告警消息最短间隔30分钟
 
@@ -251,7 +252,8 @@ bool refreshQQBotToken() {
     deserializeJson(resDoc, http.getString());
     qqbotAccessToken = resDoc["access_token"].as<String>();
     int expiresIn = resDoc["expires_in"] | 7200;
-    qqbotTokenExpiry = millis() + (expiresIn - 60) * 1000UL;  // 提前60秒刷新
+    qqbotTokenExpiry = (expiresIn - 60) * 1000UL;  // 存储有效时长（非绝对时间）
+    qqbotTokenObtainedAt = millis();  // 记录获取时刻
     Serial.println("✅ QQ Bot Token 获取成功");
     http.end();
     return true;
@@ -266,7 +268,7 @@ bool refreshQQBotToken() {
 bool sendQQBotMsg(const String& content, const String& msgId = "", const String& targetOpenId = "") {
   String openId = targetOpenId.isEmpty() ? qqbot.userOpenId : targetOpenId;
   if (openId.isEmpty()) return false;
-  if (qqbotAccessToken.isEmpty() || millis() > qqbotTokenExpiry) {
+  if (qqbotAccessToken.isEmpty() || millis() - qqbotTokenObtainedAt > qqbotTokenExpiry) {
     if (!refreshQQBotToken()) return false;
   }
 
@@ -451,7 +453,7 @@ void qqGatewayEvent(WStype_t type, uint8_t* payload, size_t length) {
         Serial.printf("📬 QQ Gateway: Hello, heartbeat=%lu ms\n", qqGwHeartbeatInterval);
 
         // 确保 token 有效
-        if (qqbotAccessToken.isEmpty() || millis() > qqbotTokenExpiry) {
+        if (qqbotAccessToken.isEmpty() || millis() - qqbotTokenObtainedAt > qqbotTokenExpiry) {
           refreshQQBotToken();
         }
         sendQQGatewayIdentify();
@@ -480,6 +482,12 @@ void qqGatewayEvent(WStype_t type, uint8_t* payload, size_t length) {
           content.trim();
           Serial.printf("📩 QQ C2C消息: [%s] %s\n", userOpenId.c_str(), content.c_str());
           handleQQCommand(content, msgId, userOpenId);
+        }
+        else if (t == "RESUMED") {
+          qqGwIdentified = true;
+          Serial.println("✅ QQ Gateway: RESUMED, 会话已恢复");
+          logOperation("QQBOT_GW", "Gateway 会话恢复");
+          sendQQGatewayHeartbeat();
         }
         else {
           Serial.printf("📬 QQ Gateway 事件: %s\n", t.c_str());
@@ -517,8 +525,15 @@ void qqGatewayEvent(WStype_t type, uint8_t* payload, size_t length) {
 void connectQQGateway() {
   if (!qqbot.enabled || qqbot.appId.isEmpty()) return;
 
+  // 先断开已有连接
+  if (qqGwConnected) {
+    qqGateway.disconnect();
+    qqGwConnected = false;
+    qqGwIdentified = false;
+  }
+
   // 确保有 access token
-  if (qqbotAccessToken.isEmpty() || millis() > qqbotTokenExpiry) {
+  if (qqbotAccessToken.isEmpty() || millis() - qqbotTokenObtainedAt > qqbotTokenExpiry) {
     if (!refreshQQBotToken()) {
       Serial.println("⚠️ QQ Gateway: 无法获取 Token，稍后重试");
       qqGwReconnectAt = millis() + QQ_GW_RECONNECT_DELAY;
@@ -550,7 +565,9 @@ void handleApiQQBotConfig() {
     DynamicJsonDocument doc(512);
     deserializeJson(doc, server.arg("plain"));
     qqbot.appId = doc["appId"].as<String>();
-    qqbot.appSecret = doc["appSecret"].as<String>();
+    if (doc.containsKey("appSecret") && doc["appSecret"].as<String>().length() > 0) {
+      qqbot.appSecret = doc["appSecret"].as<String>();
+    }
     qqbot.userOpenId = doc["userOpenId"].as<String>();
     qqbot.enabled = doc["enabled"] | false;
 
@@ -580,7 +597,7 @@ void handleApiQQBotConfig() {
     doc["userOpenId"] = qqbot.userOpenId;
     doc["enabled"] = qqbot.enabled;
     doc["hasSecret"] = !qqbot.appSecret.isEmpty();
-    doc["tokenValid"] = (!qqbotAccessToken.isEmpty() && millis() < qqbotTokenExpiry);
+    doc["tokenValid"] = (!qqbotAccessToken.isEmpty() && millis() - qqbotTokenObtainedAt < qqbotTokenExpiry);
     doc["gatewayConnected"] = qqGwConnected;
     doc["gatewayReady"] = qqGwIdentified;
     String output;
@@ -955,7 +972,6 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
       String action = doc["action"];
 
       if (action == "set_mode") {
-        bool wasAuto = autoMode;
         autoMode = (doc["mode"] == "auto");
         logOperation("MODE", autoMode ? "切换为自动模式" : "切换为手动模式");
         handleAutoLogic();
