@@ -9,6 +9,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <Adafruit_SGP30.h>
 #include <time.h>
+#include <math.h>
 #include <LittleFS.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
@@ -121,6 +122,127 @@ int history_count = 0;
 void setLED(uint8_t r, uint8_t g, uint8_t b) {
   pixel.setPixelColor(0, pixel.Color(r, g, b));
   pixel.show();
+}
+
+// ===================== LED 指示灯状态机 =====================
+
+enum LedMode {
+  LED_OFF, LED_SOLID, LED_BLINK_FAST, LED_BLINK_SLOW, LED_BREATHE, LED_FLASH_EVENT
+};
+
+struct LedState {
+  LedMode mode = LED_OFF;
+  uint8_t r = 0, g = 0, b = 0;
+  // 事件闪烁（临时覆盖）
+  uint8_t evR = 0, evG = 0, evB = 0;
+  unsigned long evEnd = 0;    // 事件闪烁结束时间
+  // QQ Gateway 蓝闪
+  unsigned long lastGwFlash = 0;
+} led;
+
+// 触发一次短暂事件闪烁（持续 duration_ms 后自动恢复）
+void ledFlashEvent(uint8_t r, uint8_t g, uint8_t b, unsigned long duration_ms = 3000) {
+  led.evR = r; led.evG = g; led.evB = b;
+  led.evEnd = millis() + duration_ms;
+}
+
+// 根据当前系统状态更新 LED
+void updateLedState() {
+  // 计算告警数量
+  int criticalCount = 0;
+  int warnCount = 0;
+
+  if (sensor_sht40_ok) {
+    if (temp > 35 || temp < 10) criticalCount++;
+    else if (temp > 28 || temp < 15) warnCount++;
+  }
+  if (soilPercent < 20) criticalCount++;
+  else if (soilPercent < 30 || soilPercent > 80) warnCount++;
+  if (sensor_sgp30_ok) {
+    if (eco2 > 1500) criticalCount++;
+    else if (eco2 > 1000) warnCount++;
+    if (tvoc > 660) criticalCount++;
+    else if (tvoc > 220) warnCount++;
+  }
+  if (sensor_sht40_ok && hum > 90) criticalCount++;
+  else if (sensor_sht40_ok && (hum > 80 || hum < 20)) warnCount++;
+
+  bool allOffline = !sensor_bh1750_ok && !sensor_sht40_ok && !sensor_sgp30_ok;
+
+  // 按优先级设置 LED 模式
+  if (criticalCount >= 2) {
+    led.mode = LED_BLINK_FAST; led.r = 255; led.g = 0; led.b = 0;
+  } else if (criticalCount == 1) {
+    led.mode = LED_BLINK_SLOW; led.r = 255; led.g = 0; led.b = 0;
+  } else if (warnCount > 0) {
+    led.mode = LED_BREATHE; led.r = 255; led.g = 100; led.b = 0;
+  } else if (allOffline) {
+    led.mode = LED_SOLID; led.r = 255; led.g = 180; led.b = 0;
+  } else {
+    led.mode = LED_SOLID; led.r = 0; led.g = 255; led.b = 0;
+  }
+}
+
+// 渲染 LED 帧（在 loop 中高频调用）
+void renderLed() {
+  unsigned long now = millis();
+
+  // 事件闪烁优先（QQ消息收到、数据归档等）
+  if (led.evEnd > 0 && now < led.evEnd) {
+    // 事件闪烁：快速开关交替
+    bool on = ((now / 300) % 2 == 0);
+    setLED(on ? led.evR : 0, on ? led.evG : 0, on ? led.evB : 0);
+    return;
+  }
+  led.evEnd = 0;
+
+  // QQ Gateway 在线时，每 30 秒蓝闪一次
+  if (qqGwIdentified && led.mode == LED_SOLID && led.r == 0 && led.g == 255 && led.b == 0) {
+    if (now - led.lastGwFlash > 30000) {
+      led.lastGwFlash = now;
+      setLED(0, 100, 255);  // 青蓝色闪
+      return;  // 下一帧恢复
+    }
+    // 蓝闪持续 200ms
+    if (now - led.lastGwFlash < 200) {
+      setLED(0, 100, 255);
+      return;
+    }
+  }
+
+  switch (led.mode) {
+    case LED_SOLID:
+      setLED(led.r, led.g, led.b);
+      break;
+
+    case LED_BLINK_FAST: {
+      bool on = ((now / 200) % 2 == 0);
+      setLED(on ? led.r : 0, on ? led.g : 0, on ? led.b : 0);
+      break;
+    }
+
+    case LED_BLINK_SLOW: {
+      bool on = ((now / 1000) % 2 == 0);
+      setLED(on ? led.r : 0, on ? led.g : 0, on ? led.b : 0);
+      break;
+    }
+
+    case LED_BREATHE: {
+      // 正弦呼吸效果 (2秒周期)
+      float phase = (float)(now % 2000) / 2000.0f;
+      float brightness = (sin(phase * 2.0f * 3.14159f - 1.5708f) + 1.0f) / 2.0f;
+      brightness = brightness * 0.85f + 0.15f;  // 最低亮度15%
+      setLED((uint8_t)(led.r * brightness),
+             (uint8_t)(led.g * brightness),
+             (uint8_t)(led.b * brightness));
+      break;
+    }
+
+    case LED_OFF:
+    default:
+      setLED(0, 0, 0);
+      break;
+  }
 }
 
 // ===================== LittleFS 持久化存储 =====================
@@ -481,6 +603,7 @@ void qqGatewayEvent(WStype_t type, uint8_t* payload, size_t length) {
           String userOpenId = d["author"]["user_openid"].as<String>();
           content.trim();
           Serial.printf("📩 QQ C2C消息: [%s] %s\n", userOpenId.c_str(), content.c_str());
+          ledFlashEvent(180, 0, 255, 3000);  // 紫色闪3秒 = 收到QQ消息
           handleQQCommand(content, msgId, userOpenId);
         }
         else if (t == "RESUMED") {
@@ -1175,10 +1298,14 @@ void setup() {
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid.c_str(), pass.c_str());
     int retry = 0;
-    while (WiFi.status() != WL_CONNECTED && retry < 30) {
-      setLED(0, 0, 255); delay(250); setLED(0, 0, 0); delay(250); 
+    while (WiFi.status() != WL_CONNECTED && retry < 300) {
+      // 蓝色呼吸效果
+      float phase = (float)(millis() % 2000) / 2000.0f;
+      float br = (sin(phase * 2.0f * 3.14159f - 1.5708f) + 1.0f) / 2.0f;
+      setLED(0, 0, (uint8_t)(255 * (br * 0.85f + 0.15f)));
+      delay(50);
       retry++;
-      if (retry % 5 == 0) Serial.print(".");
+      if (retry % 100 == 0) Serial.print(".");
     }
     Serial.println();
   }
@@ -1272,21 +1399,22 @@ void loop() {
       String broadcastStr = buildJson();
       webSocket.broadcastTXT(broadcastStr);
 
-      // LED 状态指示
-      bool allOffline = !sensor_bh1750_ok && !sensor_sht40_ok && !sensor_sgp30_ok;
-      if (allOffline) {
-        setLED(255, 180, 0);  // 黄色 = 空板/无传感器
-      } else if (soilPercent < 20 || temp > 35 || eco2 > 1500) {
-        setLED(255, 0, 0);    // 红色 = 告警
-      } else {
-        setLED(0, 255, 0);    // 绿色 = 正常
-      } 
+      // 更新 LED 状态（基于告警等级）
+      updateLedState();
+    }
+
+    // 渲染 LED 帧（支持闪烁/呼吸动画）
+    static unsigned long lastLedRender = 0;
+    if (millis() - lastLedRender > 30) {  // ~33fps
+      lastLedRender = millis();
+      renderLed();
     }
 
     // 每5分钟持久化保存一次传感器数据
     if (millis() - lastDataSave > DATA_SAVE_INTERVAL) {
       lastDataSave = millis();
       saveDataToFile();
+      ledFlashEvent(0, 200, 255, 500);  // 青色短闪500ms = 数据归档
       checkAndSendQQBotAlert();  // 顺便检查是否需要发告警
     }
 
