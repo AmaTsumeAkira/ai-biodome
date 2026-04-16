@@ -432,6 +432,10 @@ body{font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;backgroun
   </div>
   <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
     <div class="card card-sm">
+      <div class="text-xs text-gray-400 mb-1">&#x7CFB;&#x7EDF;&#x65F6;&#x95F4;</div>
+      <div class="text-lg font-bold text-gray-800" id="val-sys-time">--</div>
+    </div>
+    <div class="card card-sm">
       <div class="text-xs text-gray-400 mb-1">&#x5185;&#x5B58;&#x4F7F;&#x7528;</div>
       <div class="text-lg font-bold text-gray-800" id="val-heap">-- %</div>
     </div>
@@ -665,7 +669,7 @@ body{font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;backgroun
       document.getElementById('sched-light-start').value=data.sched.light_start||'00:00';
       document.getElementById('sched-light-end').value=data.sched.light_end||'00:00';
     }
-    if(data.time){document.getElementById('val-time-sync').innerText='\u7CFB\u7EDF\u65F6\u95F4: '+data.time;}
+    if(data.time){document.getElementById('val-time-sync').innerText='\u7CFB\u7EDF\u65F6\u95F4: '+data.time;document.getElementById('val-sys-time').innerText=data.time;}
   }
 
   window.toggleMode=function(){
@@ -716,7 +720,9 @@ body{font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;backgroun
   function loadAvailableDates(){
     fetch('/api/dates').then(function(r){return r.json();}).then(function(data){
       var sel=document.getElementById('hist-date-select');sel.innerHTML='';
-      var dates=(data.data_dates||[]).sort().reverse();
+      var dd=data.data_dates||[];var ld=data.log_dates||[];
+      var all={};dd.forEach(function(d){all[d]=true;});ld.forEach(function(d){all[d]=true;});
+      var dates=Object.keys(all).sort().reverse();
       if(dates.length===0){sel.innerHTML='<option value="">\u6682\u65E0\u5F52\u6863</option>';}
       else{dates.forEach(function(d){var o=document.createElement('option');o.value=d;o.text=d.substring(0,4)+'-'+d.substring(4,6)+'-'+d.substring(6,8);sel.appendChild(o);});}
       if(data.total_bytes){

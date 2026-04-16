@@ -603,6 +603,15 @@ void qqGatewayEvent(WStype_t type, uint8_t* payload, size_t length) {
           String userOpenId = d["author"]["user_openid"].as<String>();
           content.trim();
           Serial.printf("📩 QQ C2C消息: [%s] %s\n", userOpenId.c_str(), content.c_str());
+          // 自动保存首个发消息用户的 OpenID
+          if (qqbot.userOpenId.isEmpty() && !userOpenId.isEmpty()) {
+            qqbot.userOpenId = userOpenId;
+            preferences.begin("qqbot", false);
+            preferences.putString("userId", userOpenId);
+            preferences.end();
+            Serial.printf("📌 已自动保存用户 OpenID: %s\n", userOpenId.c_str());
+            logOperation("QQBOT", "自动保存用户OpenID: " + userOpenId);
+          }
           ledFlashEvent(180, 0, 255, 3000);  // 紫色闪3秒 = 收到QQ消息
           handleQQCommand(content, msgId, userOpenId);
         }
@@ -1010,8 +1019,8 @@ String buildJson() {
   // --- 发送当前系统时间与调度配置 ---
   struct tm timeinfo;
   if (getLocalTime(&timeinfo)) {
-    char buf[10];
-    strftime(buf, sizeof(buf), "%H:%M:%S", &timeinfo);
+    char buf[24];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
     doc["time"] = String(buf);
   }
   JsonObject s_obj = doc.createNestedObject("sched");
