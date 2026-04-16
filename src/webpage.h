@@ -328,6 +328,26 @@ body{font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;backgroun
     </div>
     <div class="text-xs text-gray-400" id="storage-info">&#x5B58;&#x50A8;&#x72B6;&#x6001;&#x52A0;&#x8F7D;&#x4E2D;...</div>
   </div>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+    <div class="card card-sm">
+      <h3 class="text-sm font-bold text-gray-600 mb-3">&#x1F4CA; &#x8BB0;&#x5F55;&#x7C92;&#x5EA6;</h3>
+      <div class="flex items-center gap-3">
+        <input type="number" id="save-interval" min="10" max="3600" step="10" value="300" class="w-24 px-2 py-1 rounded border text-sm text-center focus:ring-2 focus:ring-blue-400 outline-none">
+        <span class="text-sm text-gray-500">&#x79D2;</span>
+        <button onclick="saveSaveInterval()" class="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-xs font-medium transition-colors">&#x4FDD;&#x5B58;</button>
+        <span class="text-xs text-gray-400" id="interval-hint">&#x9ED8;&#x8BA4; 300&#x79D2;(5&#x5206;&#x949F;)</span>
+      </div>
+    </div>
+    <div class="card card-sm">
+      <h3 class="text-sm font-bold text-gray-600 mb-3">&#x1F4E5; &#x6570;&#x636E;&#x5BFC;&#x51FA;</h3>
+      <div class="flex flex-wrap items-center gap-2">
+        <select id="export-start" class="px-2 py-1 rounded border text-sm"></select>
+        <span class="text-gray-400 text-sm">&#x81F3;</span>
+        <select id="export-end" class="px-2 py-1 rounded border text-sm"></select>
+        <button onclick="exportCSV()" class="px-3 py-1 bg-green-500 hover:bg-green-600 text-white rounded-lg text-xs font-medium transition-colors">&#x5BFC;&#x51FA; CSV</button>
+      </div>
+    </div>
+  </div>
   <div id="hist-charts-wrap" style="display:none" class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
     <div class="card card-sm"><div class="chart-box" id="hist-chart-th"></div></div>
     <div class="card card-sm"><div class="chart-box" id="hist-chart-ls"></div></div>
@@ -670,6 +690,7 @@ body{font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;backgroun
       document.getElementById('sched-light-end').value=data.sched.light_end||'00:00';
     }
     if(data.time){document.getElementById('val-time-sync').innerText='\u7CFB\u7EDF\u65F6\u95F4: '+data.time;document.getElementById('val-sys-time').innerText=data.time;}
+    if(data.saveInterval){var si=document.getElementById('save-interval');if(si&&si!==document.activeElement)si.value=data.saveInterval;}
   }
 
   window.toggleMode=function(){
@@ -729,9 +750,39 @@ body{font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;backgroun
         var si=document.getElementById('storage-info');
         if(si)si.innerText='\u5B58\u50A8: '+(data.used_bytes/1024).toFixed(1)+'KB / '+(data.total_bytes/1024).toFixed(0)+'KB | \u5F52\u6863: '+dates.length+'\u5929';
       }
+      // 填充导出日期选择器
+      var es=document.getElementById('export-start'),ee=document.getElementById('export-end');
+      if(es&&ee){es.innerHTML='';ee.innerHTML='';
+        dates.forEach(function(d){var t=d.substring(0,4)+'-'+d.substring(4,6)+'-'+d.substring(6,8);
+          var o1=document.createElement('option');o1.value=d;o1.text=t;es.appendChild(o1);
+          var o2=document.createElement('option');o2.value=d;o2.text=t;ee.appendChild(o2);
+        });
+        if(dates.length>0)ee.value=dates[0];
+      }
     }).catch(function(){});
   }
   setTimeout(loadAvailableDates,2000);
+  // 加载记录粒度
+  fetch('/api/interval').then(function(r){return r.json();}).then(function(d){
+    var el=document.getElementById('save-interval');if(el&&d.interval)el.value=d.interval;
+    var h=document.getElementById('interval-hint');
+    if(h&&d.interval){var m=(d.interval/60).toFixed(1);h.innerText='\u5F53\u524D: '+d.interval+'\u79D2 ('+m+'\u5206\u949F)';}
+  }).catch(function(){});
+  window.saveSaveInterval=function(){
+    var val=parseInt(document.getElementById('save-interval').value)||300;
+    if(val<10)val=10;if(val>3600)val=3600;
+    fetch('/api/interval',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval:val})}).then(function(r){return r.json();}).then(function(d){
+      if(d.interval!=null){alert('\u8BB0\u5F55\u7C92\u5EA6\u5DF2\u8BBE\u4E3A '+d.interval+' \u79D2');
+        var h=document.getElementById('interval-hint');if(h){var m=(d.interval/60).toFixed(1);h.innerText='\u5F53\u524D: '+d.interval+'\u79D2 ('+m+'\u5206\u949F)';}}
+    }).catch(function(e){alert('\u4FDD\u5B58\u5931\u8D25: '+e.message);});
+  };
+  window.exportCSV=function(){
+    var s=document.getElementById('export-start').value;
+    var e=document.getElementById('export-end').value;
+    if(!s||!e){alert('\u8BF7\u9009\u62E9\u65E5\u671F\u8303\u56F4');return;}
+    if(s>e){var tmp=s;s=e;e=tmp;}
+    window.open('/api/export?start='+s+'&end='+e,'_blank');
+  };
 
   window.loadHistoryData=function(){
     var date=document.getElementById('hist-date-select').value;if(!date)return;

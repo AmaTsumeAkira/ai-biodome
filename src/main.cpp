@@ -55,9 +55,10 @@ unsigned long lastBaselineSave = 0;
 
 // --- LittleFS 持久化存储 ---
 bool littlefs_ok = false;
-#define DATA_SAVE_INTERVAL 300000  // 每5分钟归档一次传感器数据
+#define DEFAULT_SAVE_INTERVAL 300  // 默认每300秒(5分钟)归档一次
 #define MAX_DATA_AGE_DAYS 30       // 保留最30天的数据
 unsigned long lastDataSave = 0;
+unsigned int dataSaveInterval = DEFAULT_SAVE_INTERVAL;  // 秒，用户可配置
 
 // --- QQ Bot 配置 ---
 struct QQBotConfig {
@@ -752,6 +753,73 @@ void handleApiQQBotTest() {
     ok ? "{\"ok\":true}" : "{\"error\":\"发送失败\"}");
 }
 
+// HTTP API: 记录粒度设置 (GET/POST)
+void handleApiSaveInterval() {
+  if (server.method() == HTTP_POST) {
+    DynamicJsonDocument doc(128);
+    deserializeJson(doc, server.arg("plain"));
+    if (doc.containsKey("interval")) {
+      unsigned int val = doc["interval"].as<unsigned int>();
+      if (val < 10) val = 10;
+      if (val > 3600) val = 3600;
+      dataSaveInterval = val;
+      preferences.begin("system", false);
+      preferences.putUInt("saveIntv", dataSaveInterval);
+      preferences.end();
+      Serial.printf("📊 记录间隔已更新: %u 秒\n", dataSaveInterval);
+      logOperation("SYSTEM", "记录间隔设为 " + String(dataSaveInterval) + " 秒");
+    }
+  }
+  String resp = "{\"interval\":" + String(dataSaveInterval) + "}";
+  server.send(200, "application/json", resp);
+}
+
+// HTTP API: 导出指定日期范围的 CSV 数据
+void handleApiExport() {
+  if (!littlefs_ok) {
+    server.send(503, "text/plain", "storage unavailable");
+    return;
+  }
+  String startDate = server.arg("start");
+  String endDate = server.arg("end");
+  if (startDate.length() != 8) startDate = getDateStr();
+  if (endDate.length() != 8) endDate = startDate;
+  if (startDate.isEmpty()) {
+    server.send(503, "text/plain", "time not synced");
+    return;
+  }
+
+  // 收集日期范围内的所有 CSV 文件
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/csv", "");
+  server.sendContent("date,time,temp,hum,lux,soil,eco2,tvoc\n");
+
+  File root = LittleFS.open("/data");
+  if (root && root.isDirectory()) {
+    File file = root.openNextFile();
+    while (file) {
+      String fname = String(file.name());
+      if (fname.endsWith(".csv") && fname.length() >= 12) {
+        String fdate = fname.substring(0, 8);
+        if (fdate >= startDate && fdate <= endDate) {
+          String dateFormatted = fdate.substring(0,4) + "-" + fdate.substring(4,6) + "-" + fdate.substring(6,8);
+          // 跳过 CSV 头行，逐行发送并附加日期列
+          bool firstLine = true;
+          while (file.available()) {
+            String line = file.readStringUntil('\n');
+            line.trim();
+            if (line.isEmpty()) continue;
+            if (firstLine) { firstLine = false; continue; }  // 跳过 header
+            server.sendContent(dateFormatted + "," + line + "\n");
+          }
+        }
+      }
+      file = root.openNextFile();
+    }
+  }
+  server.sendContent("");  // 结束 chunked
+}
+
 // HTTP API: 获取指定日期的历史数据
 void handleApiHistory() {
   if (!littlefs_ok) {
@@ -1023,6 +1091,7 @@ String buildJson() {
     strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
     doc["time"] = String(buf);
   }
+  doc["saveInterval"] = dataSaveInterval;
   JsonObject s_obj = doc.createNestedObject("sched");
   s_obj["fan_en"] = sched.fan_en;
   s_obj["fan_start"] = sched.fan_start;
@@ -1287,6 +1356,14 @@ void setup() {
   sched.light_end = preferences.getString("l_e", "00:00");
   preferences.end();
 
+  // 加载数据记录粒度
+  preferences.begin("system", true);
+  dataSaveInterval = preferences.getUInt("saveIntv", DEFAULT_SAVE_INTERVAL);
+  if (dataSaveInterval < 10) dataSaveInterval = 10;  // 最小10秒
+  if (dataSaveInterval > 3600) dataSaveInterval = 3600;  // 最大1小时
+  preferences.end();
+  Serial.printf("📊 数据记录间隔: %u 秒\n", dataSaveInterval);
+
   // 加载 QQ Bot 配置
   preferences.begin("qqbot", true);
   qqbot.appId = preferences.getString("appId", "");
@@ -1331,6 +1408,8 @@ void setup() {
     server.on("/api/history", handleApiHistory);
     server.on("/api/log", handleApiLog);
     server.on("/api/dates", handleApiDates);
+    server.on("/api/interval", handleApiSaveInterval);
+    server.on("/api/export", handleApiExport);
     server.on("/api/qqbot/config", handleApiQQBotConfig);
     server.on("/api/qqbot/test", handleApiQQBotTest);
 
@@ -1420,7 +1499,7 @@ void loop() {
     }
 
     // 每5分钟持久化保存一次传感器数据
-    if (millis() - lastDataSave > DATA_SAVE_INTERVAL) {
+    if (millis() - lastDataSave > (unsigned long)dataSaveInterval * 1000UL) {
       lastDataSave = millis();
       saveDataToFile();
       ledFlashEvent(0, 200, 255, 500);  // 青色短闪500ms = 数据归档
