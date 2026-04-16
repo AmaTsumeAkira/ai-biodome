@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useApp } from './context/AppContext';
 import Dashboard from './components/Dashboard';
 import Control from './components/Control';
@@ -20,6 +20,22 @@ export default function App() {
   const { state } = useApp();
   const [currentTab, setCurrentTab] = useState<Tab>('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [gwStatus, setGwStatus] = useState<'off' | 'pending' | 'on'>('off');
+  const [gwLabel, setGwLabel] = useState('Gateway');
+
+  useEffect(() => {
+    const poll = () => {
+      fetch('/api/qqbot/config').then(r => r.json()).then(d => {
+        if (d.gatewayReady) { setGwStatus('on'); setGwLabel('GW 在线'); }
+        else if (d.gatewayConnected) { setGwStatus('pending'); setGwLabel('GW 连接中'); }
+        else if (d.enabled) { setGwStatus('off'); setGwLabel('GW 离线'); }
+        else { setGwStatus('off'); setGwLabel('GW 未启用'); }
+      }).catch(() => {});
+    };
+    const t = window.setTimeout(poll, 3000);
+    const i = window.setInterval(poll, 15000);
+    return () => { clearTimeout(t); clearInterval(i); };
+  }, []);
 
   const switchTab = useCallback((tab: Tab) => {
     setCurrentTab(tab);
@@ -62,6 +78,10 @@ export default function App() {
           <div className="conn-badge">
             <span className={`conn-dot ${wsDotClass}`} />
             <span>{wsText}</span>
+          </div>
+          <div className="conn-badge" style={{ marginTop: 4 }}>
+            <span className={`conn-dot ${gwStatus}`} />
+            <span>{gwLabel}</span>
           </div>
         </div>
       </nav>

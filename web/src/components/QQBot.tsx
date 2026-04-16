@@ -59,13 +59,14 @@ export default function QQBot() {
     return () => clearInterval(timer);
   }, [loadConfig]);
 
-  const saveConfig = async () => {
+  const saveConfig = useCallback(async (overrides?: Partial<QQBotState>) => {
+    const merged = { ...cfg, ...overrides };
     const body: Record<string, unknown> = {
-      appId: cfg.appId,
-      userOpenId: cfg.userOpenId,
-      enabled: cfg.enabled,
+      appId: merged.appId,
+      userOpenId: merged.userOpenId,
+      enabled: merged.enabled,
     };
-    if (cfg.appSecret) body.appSecret = cfg.appSecret;
+    if (merged.appSecret) body.appSecret = merged.appSecret;
     try {
       const res = await fetch('/api/qqbot/config', {
         method: 'POST',
@@ -75,7 +76,7 @@ export default function QQBot() {
       const d = await res.json();
       if (d.ok) { alert('配置已保存'); loadConfig(); }
     } catch (e) { alert('保存失败: ' + (e as Error).message); }
-  };
+  }, [cfg, loadConfig]);
 
   const testBot = async () => {
     try {
@@ -103,7 +104,7 @@ export default function QQBot() {
               type="checkbox"
               className="sr-only peer"
               checked={cfg.enabled}
-              onChange={(e) => { setCfg({ ...cfg, enabled: e.target.checked }); saveConfig(); }}
+              onChange={(e) => { const v = e.target.checked; setCfg({ ...cfg, enabled: v }); saveConfig({ enabled: v }); }}
             />
             <div className="w-12 h-6 bg-gray-300 rounded-full peer peer-checked:bg-blue-500 peer-checked:after:translate-x-6 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all after:shadow" />
           </label>
@@ -143,7 +144,7 @@ export default function QQBot() {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          <button onClick={saveConfig} className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">保存配置</button>
+          <button onClick={() => saveConfig()} className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">保存配置</button>
           <button onClick={testBot} className="px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded-lg text-sm font-medium transition-colors">发送测试</button>
         </div>
       </div>

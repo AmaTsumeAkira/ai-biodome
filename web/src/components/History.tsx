@@ -33,7 +33,7 @@ export default function History() {
   const [dates, setDates] = useState<string[]>([]);
   const [selectedDate, setSelectedDate] = useState('');
   const [storageInfo, setStorageInfo] = useState('存储状态加载中...');
-  const [interval, setInterval] = useState(300);
+  const [saveInterval, setSaveInterval] = useState(300);
   const [intervalHint, setIntervalHint] = useState('');
   const [showCharts, setShowCharts] = useState(false);
   const [showStats, setShowStats] = useState(false);
@@ -74,7 +74,7 @@ export default function History() {
       .then((r) => r.json())
       .then((d: { interval: number }) => {
         if (d.interval) {
-          setInterval(d.interval);
+          setSaveInterval(d.interval);
           setIntervalHint(`当前: ${d.interval}秒 (${(d.interval / 60).toFixed(1)}分钟)`);
         }
       })
@@ -118,8 +118,8 @@ export default function History() {
     } catch (e) { alert('查询失败: ' + (e as Error).message); }
   }, [selectedDate]);
 
-  const saveSaveInterval = async () => {
-    let val = interval;
+  const doSaveInterval = async () => {
+    let val = saveInterval;
     if (val < 10) val = 10;
     if (val > 3600) val = 3600;
     try {
@@ -179,9 +179,9 @@ export default function History() {
         <div className="card card-sm">
           <h3 className="text-sm font-bold text-gray-600 mb-3">📊 记录粒度</h3>
           <div className="flex items-center gap-3">
-            <input type="number" min={10} max={3600} step={10} value={interval} onChange={(e) => setInterval(+e.target.value)} className="w-24 px-2 py-1 rounded border text-sm text-center focus:ring-2 focus:ring-blue-400 outline-none" />
+            <input type="number" min={10} max={3600} step={10} value={saveInterval} onChange={(e) => setSaveInterval(+e.target.value)} className="w-24 px-2 py-1 rounded border text-sm text-center focus:ring-2 focus:ring-blue-400 outline-none" />
             <span className="text-sm text-gray-500">秒</span>
-            <button onClick={saveSaveInterval} className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-xs font-medium transition-colors">保存</button>
+            <button onClick={doSaveInterval} className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-xs font-medium transition-colors">保存</button>
             <span className="text-xs text-gray-400">{intervalHint || '默认 300秒(5分钟)'}</span>
           </div>
         </div>
@@ -200,14 +200,12 @@ export default function History() {
         </div>
       </div>
 
-      {/* History charts */}
-      {showCharts && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
-          <div className="card card-sm"><div className="chart-box" ref={thChart.containerRef} /></div>
-          <div className="card card-sm"><div className="chart-box" ref={lsChart.containerRef} /></div>
-          <div className="card card-sm"><div className="chart-box" ref={aqChart.containerRef} /></div>
-        </div>
-      )}
+      {/* History charts — always mounted so useChart can init; toggle display */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6" style={{ display: showCharts ? '' : 'none' }}>
+        <div className="card card-sm"><div className="chart-box" ref={thChart.containerRef} /></div>
+        <div className="card card-sm"><div className="chart-box" ref={lsChart.containerRef} /></div>
+        <div className="card card-sm"><div className="chart-box" ref={aqChart.containerRef} /></div>
+      </div>
 
       {/* History stats */}
       {showStats && histData && (
@@ -255,7 +253,7 @@ export default function History() {
             ) : (
               logEntries.map((entry, i) => (
                 <div key={i} className="py-1 border-b border-slate-200">
-                  {entry.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}
+                  {entry}
                 </div>
               ))
             )}
