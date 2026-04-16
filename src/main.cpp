@@ -398,7 +398,7 @@ bool sendQQBotMsg(const String& content, const String& msgId = "", const String&
   client.setInsecure();
   HTTPClient http;
 
-  String url = "https://api.sbot.qq.com/v2/users/" + openId + "/messages";
+  String url = "https://api.sgroup.qq.com/v2/users/" + openId + "/messages";
   http.begin(client, url);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", "QQBot " + qqbotAccessToken);
