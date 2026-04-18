@@ -8,6 +8,9 @@ import {
   RobotOutlined,
   SettingOutlined,
   MenuOutlined,
+  ExperimentOutlined,
+  FileTextOutlined,
+  CloudUploadOutlined,
 } from '@ant-design/icons';
 import { useApp } from './context/AppContext';
 import Dashboard from './components/Dashboard';
@@ -17,6 +20,9 @@ import QQBot from './components/QQBot';
 import System from './components/System';
 import DigitalTwin from './components/DigitalTwin';
 import AIChat from './components/AIChat';
+import GrowthLog from './components/GrowthLog';
+import SmartReport from './components/SmartReport';
+import OTAUpdate from './components/OTAUpdate';
 import type { Tab } from './types';
 
 const { Sider, Content, Header } = Layout;
@@ -28,8 +34,11 @@ const menuItems = [
   { key: 'twin', icon: <DeploymentUnitOutlined />, label: '数字孪生' },
   { key: 'control', icon: <ControlOutlined />, label: '设备控制' },
   { key: 'history', icon: <HistoryOutlined />, label: '历史数据' },
+  { key: 'growlog', icon: <ExperimentOutlined />, label: '生长日志' },
+  { key: 'report', icon: <FileTextOutlined />, label: '智能报告' },
   { key: 'qqbot', icon: <RobotOutlined />, label: 'QQ 机器人' },
   { key: 'system', icon: <SettingOutlined />, label: '系统信息' },
+  { key: 'ota', icon: <CloudUploadOutlined />, label: 'OTA 升级' },
 ];
 
 export default function App() {
@@ -72,8 +81,11 @@ export default function App() {
       case 'twin': return <DigitalTwin />;
       case 'control': return <Control />;
       case 'history': return <History />;
+      case 'growlog': return <GrowthLog />;
+      case 'report': return <SmartReport />;
       case 'qqbot': return <QQBot />;
       case 'system': return <System />;
+      case 'ota': return <OTAUpdate />;
     }
   };
 

@@ -81,7 +81,17 @@ export interface AppState {
   wsStatus: 'connected' | 'connecting' | 'disconnected';
 }
 
-export type Tab = 'dashboard' | 'twin' | 'control' | 'history' | 'qqbot' | 'system';
+export type Tab = 'dashboard' | 'twin' | 'control' | 'history' | 'growlog' | 'report' | 'qqbot' | 'system' | 'ota';
+
+export interface GrowLogEntry {
+  id: number;
+  date: string;
+  stage: string;
+  note: string;
+  temp?: number;
+  hum?: number;
+  soil?: number;
+}
 
 export interface ChatMessage {
   role: 'user' | 'ai';

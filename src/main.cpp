@@ -13,6 +13,7 @@
 #include <LittleFS.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <Update.h>
 #include <vector>
 #include <algorithm>
 #include <WebSocketsClient.h>
@@ -1407,6 +1408,291 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
   }
 }
 
+// ===================== 生长日志 API =====================
+#define GROWLOG_FILE "/growlog.json"
+
+void handleApiGrowLog() {
+  if (!littlefs_ok) {
+    server.send(503, "application/json", "{\"error\":\"storage unavailable\"}");
+    return;
+  }
+
+  if (server.method() == HTTP_GET) {
+    // 读取所有日志
+    if (!LittleFS.exists(GROWLOG_FILE)) {
+      server.send(200, "application/json", "{\"entries\":[]}");
+      return;
+    }
+    File f = LittleFS.open(GROWLOG_FILE, "r");
+    if (!f) {
+      server.send(500, "application/json", "{\"error\":\"read error\"}");
+      return;
+    }
+    String content = f.readString();
+    f.close();
+    server.send(200, "application/json", content);
+    return;
+  }
+
+  if (server.method() == HTTP_POST) {
+    // 添加日志
+    DynamicJsonDocument inputDoc(512);
+    if (deserializeJson(inputDoc, server.arg("plain"))) {
+      server.send(400, "application/json", "{\"error\":\"invalid JSON\"}");
+      return;
+    }
+
+    // 读取已有数据
+    DynamicJsonDocument doc(8192);
+    JsonArray entries;
+    if (LittleFS.exists(GROWLOG_FILE)) {
+      File f = LittleFS.open(GROWLOG_FILE, "r");
+      if (f) {
+        deserializeJson(doc, f);
+        f.close();
+      }
+    }
+    if (!doc.containsKey("entries")) {
+      entries = doc.createNestedArray("entries");
+    } else {
+      entries = doc["entries"];
+    }
+
+    // 生成 ID
+    int maxId = 0;
+    for (JsonObject e : entries) {
+      int id = e["id"] | 0;
+      if (id > maxId) maxId = id;
+    }
+
+    // 获取当前时间
+    struct tm ti;
+    getLocalTime(&ti);
+    char dateStr[20];
+    snprintf(dateStr, sizeof(dateStr), "%04d-%02d-%02d %02d:%02d",
+      ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday, ti.tm_hour, ti.tm_min);
+
+    JsonObject newEntry = entries.createNestedObject();
+    newEntry["id"] = maxId + 1;
+    newEntry["date"] = String(dateStr);
+    newEntry["stage"] = inputDoc["stage"] | "note";
+    newEntry["note"] = inputDoc["note"] | "";
+    if (inputDoc.containsKey("temp")) newEntry["temp"] = inputDoc["temp"];
+    if (inputDoc.containsKey("hum")) newEntry["hum"] = inputDoc["hum"];
+    if (inputDoc.containsKey("soil")) newEntry["soil"] = inputDoc["soil"];
+
+    // 保存
+    File f = LittleFS.open(GROWLOG_FILE, "w");
+    if (!f) {
+      server.send(500, "application/json", "{\"error\":\"write error\"}");
+      return;
+    }
+    serializeJson(doc, f);
+    f.close();
+
+    logOperation("GROWLOG", "添加日志: " + String(inputDoc["stage"] | "note"));
+    server.send(200, "application/json", "{\"ok\":true,\"id\":" + String(maxId + 1) + "}");
+    return;
+  }
+
+  if (server.method() == HTTP_DELETE) {
+    // 删除日志
+    int delId = server.arg("id").toInt();
+    if (delId <= 0) {
+      server.send(400, "application/json", "{\"error\":\"invalid id\"}");
+      return;
+    }
+
+    DynamicJsonDocument doc(8192);
+    if (LittleFS.exists(GROWLOG_FILE)) {
+      File f = LittleFS.open(GROWLOG_FILE, "r");
+      if (f) { deserializeJson(doc, f); f.close(); }
+    }
+
+    if (!doc.containsKey("entries")) {
+      server.send(404, "application/json", "{\"error\":\"not found\"}");
+      return;
+    }
+
+    JsonArray entries = doc["entries"];
+    for (size_t i = 0; i < entries.size(); i++) {
+      if ((entries[i]["id"] | 0) == delId) {
+        entries.remove(i);
+        break;
+      }
+    }
+
+    File f = LittleFS.open(GROWLOG_FILE, "w");
+    if (f) { serializeJson(doc, f); f.close(); }
+    server.send(200, "application/json", "{\"ok\":true}");
+    return;
+  }
+
+  server.send(405, "application/json", "{\"error\":\"method not allowed\"}");
+}
+
+// ===================== 智能报告 API =====================
+#define REPORT_FILE "/reports.json"
+
+void handleApiReportGenerate() {
+  // 构建环境摘要供 AI 分析
+  String envData = "当前环境数据:\n";
+  envData += "温度: " + String(temp, 1) + "°C\n";
+  envData += "湿度: " + String(hum, 1) + "%\n";
+  envData += "光照: " + String(lux, 0) + " lx\n";
+  envData += "土壤湿度: " + String(soilPercent) + "%\n";
+  envData += "eCO2: " + String(eco2) + " ppm\n";
+  envData += "TVOC: " + String(tvoc) + " ppb\n\n";
+
+  // 获取最近的历史数据摘要
+  envData += "最近历史趋势(最近" + String(history_count) + "条):\n";
+  if (history_count > 0) {
+    float tMin=999,tMax=-999,tSum=0;
+    float hMin=999,hMax=-999,hSum=0;
+    int sMin=999,sMax=-999,sSum=0;
+    for (int i = 0; i < history_count; i++) {
+      int idx = (history_head - history_count + i + HISTORY_SIZE) % HISTORY_SIZE;
+      if(h_temp[idx]<tMin) tMin=h_temp[idx]; if(h_temp[idx]>tMax) tMax=h_temp[idx]; tSum+=h_temp[idx];
+      if(h_hum[idx]<hMin) hMin=h_hum[idx]; if(h_hum[idx]>hMax) hMax=h_hum[idx]; hSum+=h_hum[idx];
+      if(h_soil[idx]<sMin) sMin=h_soil[idx]; if(h_soil[idx]>sMax) sMax=h_soil[idx]; sSum+=h_soil[idx];
+    }
+    envData += "温度范围: " + String(tMin,1) + "~" + String(tMax,1) + "°C, 均值: " + String(tSum/history_count,1) + "°C\n";
+    envData += "湿度范围: " + String(hMin,1) + "~" + String(hMax,1) + "%, 均值: " + String(hSum/history_count,1) + "%\n";
+    envData += "土壤范围: " + String(sMin) + "~" + String(sMax) + "%, 均值: " + String(sSum/history_count) + "%\n";
+  }
+
+  // 设备状态
+  envData += "\n设备状态: 模式=" + String(autoMode ? "自动" : "手动");
+  envData += " 水泵=" + String(statePump ? "开" : "关");
+  envData += " 补光灯=" + String(stateLight ? "开" : "关");
+  envData += " 加热器=" + String(stateHeater ? "开" : "关");
+  envData += " 风扇=" + String(stateFan ? "开" : "关");
+
+  String sysPrompt = "你是地下温室智慧种植系统的AI分析专家。请根据环境数据生成分析报告。"
+    "你必须严格按以下JSON格式输出(不要有其他文字):"
+    "{\"score\":健康评分0-100,\"summary\":\"一段分析摘要(100字内)\",\"suggestions\":[\"建议1\",\"建议2\",\"建议3\"]}"
+    "\n评分标准: 温度18-28°C满分, 湿度40-70%满分, 光照300-800lx满分, 土壤30-60%满分, CO2<1000ppm满分";
+
+  String aiReply = callMiniMaxAI(sysPrompt, envData);
+
+  // 尝试解析 AI 返回的 JSON
+  DynamicJsonDocument respDoc(2048);
+  DeserializationError err = deserializeJson(respDoc, aiReply);
+
+  // 获取当前时间
+  struct tm ti;
+  getLocalTime(&ti);
+  char tsStr[20];
+  snprintf(tsStr, sizeof(tsStr), "%04d-%02d-%02d %02d:%02d",
+    ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday, ti.tm_hour, ti.tm_min);
+
+  DynamicJsonDocument outDoc(2048);
+  if (!err && respDoc.containsKey("score")) {
+    outDoc["score"] = respDoc["score"];
+    outDoc["summary"] = respDoc["summary"];
+    JsonArray sugs = outDoc.createNestedArray("suggestions");
+    if (respDoc.containsKey("suggestions")) {
+      for (JsonVariant s : respDoc["suggestions"].as<JsonArray>()) {
+        sugs.add(s.as<String>());
+      }
+    }
+  } else {
+    // AI 没有按格式返回，用原始文本作为摘要
+    outDoc["score"] = 70;
+    outDoc["summary"] = aiReply;
+    outDoc.createNestedArray("suggestions");
+  }
+  outDoc["timestamp"] = String(tsStr);
+
+  // 保存到历史
+  if (littlefs_ok) {
+    DynamicJsonDocument histDoc(8192);
+    JsonArray reports;
+    if (LittleFS.exists(REPORT_FILE)) {
+      File f = LittleFS.open(REPORT_FILE, "r");
+      if (f) { deserializeJson(histDoc, f); f.close(); }
+    }
+    if (!histDoc.containsKey("reports")) {
+      reports = histDoc.createNestedArray("reports");
+    } else {
+      reports = histDoc["reports"];
+    }
+
+    // 只保留最近10条
+    while (reports.size() >= 10) reports.remove(0);
+
+    JsonObject entry = reports.createNestedObject();
+    entry["score"] = outDoc["score"];
+    entry["summary"] = outDoc["summary"];
+    entry["timestamp"] = outDoc["timestamp"];
+    JsonArray eSugs = entry.createNestedArray("suggestions");
+    if (outDoc.containsKey("suggestions")) {
+      for (JsonVariant s : outDoc["suggestions"].as<JsonArray>()) {
+        eSugs.add(s.as<String>());
+      }
+    }
+
+    File f = LittleFS.open(REPORT_FILE, "w");
+    if (f) { serializeJson(histDoc, f); f.close(); }
+  }
+
+  String output;
+  serializeJson(outDoc, output);
+  server.send(200, "application/json", output);
+  logOperation("AI", "生成智能报告, 评分: " + String(outDoc["score"].as<int>()));
+}
+
+void handleApiReportHistory() {
+  if (!littlefs_ok || !LittleFS.exists(REPORT_FILE)) {
+    server.send(200, "application/json", "{\"reports\":[]}");
+    return;
+  }
+  File f = LittleFS.open(REPORT_FILE, "r");
+  if (!f) {
+    server.send(500, "application/json", "{\"error\":\"read error\"}");
+    return;
+  }
+  String content = f.readString();
+  f.close();
+  server.send(200, "application/json", content);
+}
+
+// ===================== OTA 固件升级 API =====================
+void handleOTAUpload() {
+  HTTPUpload& upload = server.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    Serial.printf("OTA 开始: %s (%u bytes)\n", upload.filename.c_str(), upload.totalSize);
+    logOperation("OTA", "固件上传开始: " + upload.filename);
+
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      Serial.printf("OTA 成功: %u bytes\n", upload.totalSize);
+      logOperation("OTA", "固件升级成功: " + String(upload.totalSize) + " bytes");
+    } else {
+      Update.printError(Serial);
+      logOperation("OTA", "固件升级失败");
+    }
+  }
+}
+
+void handleOTAResult() {
+  if (Update.hasError()) {
+    server.send(500, "text/plain", "OTA 失败");
+  } else {
+    server.send(200, "text/plain", "OTA 成功");
+    delay(1000);
+    ESP.restart();
+  }
+}
+
 void handleRootSTA() {
   server.sendHeader("Content-Encoding", "gzip");
   server.send_P(200, "text/html", (const char*)index_html_gz, index_html_gz_len);
@@ -1619,6 +1905,10 @@ void setup() {
     server.on("/api/ai/config", handleApiAIConfig);
     server.on("/api/qqbot/config", handleApiQQBotConfig);
     server.on("/api/qqbot/test", handleApiQQBotTest);
+    server.on("/api/growlog", handleApiGrowLog);
+    server.on("/api/report/generate", HTTP_POST, handleApiReportGenerate);
+    server.on("/api/report/history", HTTP_GET, handleApiReportHistory);
+    server.on("/api/ota", HTTP_POST, handleOTAResult, handleOTAUpload);
 
     // 启动 QQ Bot Gateway
     if (qqbot.enabled && !qqbot.appId.isEmpty()) {
