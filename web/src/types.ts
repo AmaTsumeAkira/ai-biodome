@@ -81,7 +81,7 @@ export interface AppState {
   wsStatus: 'connected' | 'connecting' | 'disconnected';
 }
 
-export type Tab = 'dashboard' | 'control' | 'history' | 'qqbot' | 'system';
+export type Tab = 'dashboard' | 'twin' | 'control' | 'history' | 'qqbot' | 'system';
 
 export interface ChatMessage {
   role: 'user' | 'ai';

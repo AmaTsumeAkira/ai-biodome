@@ -1,6 +1,10 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { useChart } from '../hooks/useChart';
-import { makeChartOpt, calcStats } from '../utils/charts';
+import { useState, useEffect, useCallback } from 'react';
+import { Card, Row, Col, Select, Button, InputNumber, Table, Typography, Flex, List, App } from 'antd';
+import { SearchOutlined, FileTextOutlined, DownloadOutlined, SaveOutlined } from '@ant-design/icons';
+import { Line } from '@ant-design/plots';
+import { calcStats, toChartData } from '../utils/charts';
+
+const { Title, Text } = Typography;
 
 interface DateInfo {
   data_dates: string[];
@@ -29,94 +33,105 @@ const STATS = [
   { key: 'tvoc', label: '🧪 TVOC', unit: 'ppb', dec: 0 },
 ] as const;
 
+const statsColumns = [
+  { title: '指标', dataIndex: 'label', key: 'label', width: 100 },
+  { title: '最小', dataIndex: 'min', key: 'min', align: 'center' as const },
+  { title: '最大', dataIndex: 'max', key: 'max', align: 'center' as const },
+  { title: '平均', dataIndex: 'avg', key: 'avg', align: 'center' as const },
+  { title: '数据点', dataIndex: 'count', key: 'count', align: 'center' as const },
+];
+
+const lineConfig = (colors: string[]) => ({
+  xField: 'time' as const,
+  yField: 'value' as const,
+  colorField: 'type' as const,
+  smooth: false,
+  height: 220,
+  axis: {
+    x: { label: { autoRotate: false, style: { fontSize: 10, fill: '#94a3b8' } } },
+    y: { title: false as const, label: { style: { fontSize: 10, fill: '#94a3b8' } } },
+  },
+  style: { lineWidth: 1.5 },
+  scale: { color: { range: colors } },
+  legend: { position: 'top' as const, itemMarker: 'smooth' as const },
+  animation: false,
+});
+
 export default function History() {
+  const { message } = App.useApp();
   const [dates, setDates] = useState<string[]>([]);
   const [selectedDate, setSelectedDate] = useState('');
-  const [storageInfo, setStorageInfo] = useState('存储状态加载中...');
+  const [storageInfo, setStorageInfo] = useState('加载中...');
   const [saveInterval, setSaveInterval] = useState(300);
-  const [intervalHint, setIntervalHint] = useState('');
   const [showCharts, setShowCharts] = useState(false);
-  const [showStats, setShowStats] = useState(false);
   const [showLog, setShowLog] = useState(false);
   const [logEntries, setLogEntries] = useState<string[]>([]);
   const [histData, setHistData] = useState<HistoryApiData | null>(null);
-  const chartsReady = useRef(false);
+  const [loading, setLoading] = useState(false);
+  const [exportStart, setExportStart] = useState('');
+  const [exportEnd, setExportEnd] = useState('');
 
-  const thChart = useChart(makeChartOpt('温湿度', ['温度(°C)', '湿度(%)'], ['#ef4444', '#3b82f6'], ['°C', '%']));
-  const lsChart = useChart(makeChartOpt('光照·土壤', ['光照(lx)', '土壤(%)'], ['#f97316', '#22c55e'], ['lx', '%']));
-  const aqChart = useChart(makeChartOpt('空气质量', ['eCO2(ppm)', 'TVOC(ppb)'], ['#14b8a6', '#a855f7'], ['ppm', 'ppb'], 400));
+  const fmtDate = (d: string) => `${d.substring(0, 4)}-${d.substring(4, 6)}-${d.substring(6, 8)}`;
 
-  // Load available dates
   useEffect(() => {
-    const load = async () => {
-      try {
-        const res = await fetch('/api/dates');
-        const d: DateInfo = await res.json();
+    fetch('/api/dates')
+      .then((r) => r.json())
+      .then((d: DateInfo) => {
         const all: Record<string, true> = {};
         (d.data_dates || []).forEach((x) => (all[x] = true));
         (d.log_dates || []).forEach((x) => (all[x] = true));
         const sorted = Object.keys(all).sort().reverse();
         setDates(sorted);
-        if (sorted.length) setSelectedDate(sorted[0]);
-        if (d.total_bytes) {
-          setStorageInfo(
-            `存储: ${((d.used_bytes || 0) / 1024).toFixed(1)}KB / ${(d.total_bytes / 1024).toFixed(0)}KB | 归档: ${sorted.length}天`,
-          );
+        if (sorted.length) {
+          setSelectedDate(sorted[0]);
+          setExportStart(sorted[sorted.length - 1]);
+          setExportEnd(sorted[0]);
         }
-      } catch { /* ignore */ }
-    };
-    load();
-  }, []);
-
-  // Load recording interval
-  useEffect(() => {
-    fetch('/api/interval')
-      .then((r) => r.json())
-      .then((d: { interval: number }) => {
-        if (d.interval) {
-          setSaveInterval(d.interval);
-          setIntervalHint(`当前: ${d.interval}秒 (${(d.interval / 60).toFixed(1)}分钟)`);
+        if (d.total_bytes) {
+          setStorageInfo(`${((d.used_bytes || 0) / 1024).toFixed(1)}KB / ${(d.total_bytes / 1024).toFixed(0)}KB | 归档 ${sorted.length} 天`);
         }
       })
+      .catch(() => setStorageInfo('无法获取'));
+
+    fetch('/api/interval')
+      .then((r) => r.json())
+      .then((d: { interval: number }) => { if (d.interval) setSaveInterval(d.interval); })
       .catch(() => {});
   }, []);
 
-  const fmtDate = (d: string) => `${d.substring(0, 4)}-${d.substring(4, 6)}-${d.substring(6, 8)}`;
-
-  const loadHistoryData = useCallback(async () => {
+  const loadData = useCallback(async () => {
     if (!selectedDate) return;
+    setLoading(true);
     try {
       const res = await fetch(`/api/history?date=${selectedDate}`);
       const data: HistoryApiData = await res.json();
-      if (data.error) { alert(data.error); return; }
+      if (data.error) { message.error(data.error); return; }
       setHistData(data);
       setShowCharts(true);
-      setShowStats(true);
       setShowLog(false);
-      chartsReady.current = true;
+    } catch (e) {
+      message.error('查询失败: ' + (e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedDate, message]);
 
-      const dl = fmtDate(selectedDate);
-      thChart.resetOption(makeChartOpt(`${dl} 温湿度`, ['温度(°C)', '湿度(%)'], ['#ef4444', '#3b82f6'], ['°C', '%']));
-      thChart.updateData({ xAxis: { data: data.time }, series: [{ data: data.temp }, { data: data.hum }] });
-      lsChart.resetOption(makeChartOpt(`${dl} 光照·土壤`, ['光照(lx)', '土壤(%)'], ['#f97316', '#22c55e'], ['lx', '%']));
-      lsChart.updateData({ xAxis: { data: data.time }, series: [{ data: data.lux }, { data: data.soil }] });
-      aqChart.resetOption(makeChartOpt(`${dl} 空气质量`, ['eCO2(ppm)', 'TVOC(ppb)'], ['#14b8a6', '#a855f7'], ['ppm', 'ppb'], 400));
-      aqChart.updateData({ xAxis: { data: data.time }, series: [{ data: data.eco2 }, { data: data.tvoc }] });
-    } catch (e) { alert('查询失败: ' + (e as Error).message); }
-  }, [selectedDate, thChart, lsChart, aqChart]);
-
-  const loadHistoryLog = useCallback(async () => {
+  const loadLog = useCallback(async () => {
     if (!selectedDate) return;
+    setLoading(true);
     try {
       const res = await fetch(`/api/log?date=${selectedDate}`);
       const data = await res.json();
-      if (data.error) { alert(data.error); return; }
+      if (data.error) { message.error(data.error); return; }
       setLogEntries(data.entries || []);
       setShowCharts(false);
-      setShowStats(false);
       setShowLog(true);
-    } catch (e) { alert('查询失败: ' + (e as Error).message); }
-  }, [selectedDate]);
+    } catch (e) {
+      message.error('查询失败: ' + (e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedDate, message]);
 
   const doSaveInterval = async () => {
     let val = saveInterval;
@@ -129,137 +144,118 @@ export default function History() {
         body: JSON.stringify({ interval: val }),
       });
       const d = await res.json();
-      if (d.interval != null) {
-        alert(`记录粒度已设为 ${d.interval} 秒`);
-        setIntervalHint(`当前: ${d.interval}秒 (${(d.interval / 60).toFixed(1)}分钟)`);
-      }
-    } catch (e) { alert('保存失败: ' + (e as Error).message); }
-  };
-
-  const [exportStart, setExportStart] = useState('');
-  const [exportEnd, setExportEnd] = useState('');
-
-  useEffect(() => {
-    if (dates.length > 0) {
-      setExportStart(dates[dates.length - 1]);
-      setExportEnd(dates[0]);
+      if (d.interval != null) message.success(`记录粒度已设为 ${d.interval} 秒`);
+    } catch (e) {
+      message.error('保存失败: ' + (e as Error).message);
     }
-  }, [dates]);
+  };
 
   const exportCSV = () => {
     let s = exportStart, e = exportEnd;
-    if (!s || !e) { alert('请选择日期范围'); return; }
-    if (s > e) { [s, e] = [e, s]; }
+    if (!s || !e) { message.warning('请选择日期范围'); return; }
+    if (s > e) [s, e] = [e, s];
     window.open(`/api/export?start=${s}&end=${e}`, '_blank');
   };
 
+  const dateOpts = dates.map((d) => ({ value: d, label: fmtDate(d) }));
+
+  const statsData = histData
+    ? STATS.map((m) => {
+        const arr = histData[m.key as keyof HistoryApiData] as number[];
+        const s = calcStats(arr);
+        if (!s) return null;
+        return { key: m.key, label: m.label, min: s.min.toFixed(m.dec), max: s.max.toFixed(m.dec), avg: s.avg.toFixed(m.dec), count: arr.length };
+      }).filter(Boolean)
+    : [];
+
   return (
-    <div>
-      <h1 className="text-xl font-bold text-gray-800 mb-5">历史数据</h1>
-
-      <div className="card mb-6">
-        <div className="flex flex-wrap items-center gap-3 mb-3">
-          <select
-            className="px-3 py-2 rounded-lg border text-sm focus:ring-2 focus:ring-blue-400 outline-none"
-            value={selectedDate}
-            onChange={(e) => setSelectedDate(e.target.value)}
-          >
-            {dates.length === 0 && <option value="">暂无归档</option>}
-            {dates.map((d) => (
-              <option key={d} value={d}>{fmtDate(d)}</option>
-            ))}
-          </select>
-          <button onClick={loadHistoryData} className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">查询数据</button>
-          <button onClick={loadHistoryLog} className="px-4 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-lg text-sm font-medium transition-colors">查看日志</button>
-        </div>
-        <div className="text-xs text-gray-400">{storageInfo}</div>
+    <>
+      <div className="page-header">
+        <Title level={4} style={{ margin: 0, color: '#1e293b', fontWeight: 700, letterSpacing: 0.5 }}>📁 历史数据</Title>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-        <div className="card card-sm">
-          <h3 className="text-sm font-bold text-gray-600 mb-3">📊 记录粒度</h3>
-          <div className="flex items-center gap-3">
-            <input type="number" min={10} max={3600} step={10} value={saveInterval} onChange={(e) => setSaveInterval(+e.target.value)} className="w-24 px-2 py-1 rounded border text-sm text-center focus:ring-2 focus:ring-blue-400 outline-none" />
-            <span className="text-sm text-gray-500">秒</span>
-            <button onClick={doSaveInterval} className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-xs font-medium transition-colors">保存</button>
-            <span className="text-xs text-gray-400">{intervalHint || '默认 300秒(5分钟)'}</span>
-          </div>
-        </div>
-        <div className="card card-sm">
-          <h3 className="text-sm font-bold text-gray-600 mb-3">📥 数据导出</h3>
-          <div className="flex flex-wrap items-center gap-2">
-            <select className="px-2 py-1 rounded border text-sm" value={exportStart} onChange={(e) => setExportStart(e.target.value)}>
-              {dates.map((d) => <option key={d} value={d}>{fmtDate(d)}</option>)}
-            </select>
-            <span className="text-gray-400 text-sm">至</span>
-            <select className="px-2 py-1 rounded border text-sm" value={exportEnd} onChange={(e) => setExportEnd(e.target.value)}>
-              {dates.map((d) => <option key={d} value={d}>{fmtDate(d)}</option>)}
-            </select>
-            <button onClick={exportCSV} className="px-3 py-1 bg-green-500 hover:bg-green-600 text-white rounded-lg text-xs font-medium transition-colors">导出 CSV</button>
-          </div>
-        </div>
-      </div>
+      <Card style={{ marginBottom: 16, boxShadow: '0 2px 8px rgba(0,0,0,0.04)' }}>
+        <Flex wrap gap={12} align="center">
+          <Select
+            value={selectedDate || undefined}
+            onChange={setSelectedDate}
+            options={dateOpts}
+            placeholder="选择日期"
+            style={{ width: 160 }}
+            notFoundContent="暂无归档"
+          />
+          <Button type="primary" icon={<SearchOutlined />} loading={loading} onClick={loadData}>查询数据</Button>
+          <Button icon={<FileTextOutlined />} loading={loading} onClick={loadLog}>查看日志</Button>
+          <Text type="secondary" style={{ fontSize: 12 }}>存储: {storageInfo}</Text>
+        </Flex>
+      </Card>
 
-      {/* History charts — always mounted so useChart can init; toggle display */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6" style={{ display: showCharts ? '' : 'none' }}>
-        <div className="card card-sm"><div className="chart-box" ref={thChart.containerRef} /></div>
-        <div className="card card-sm"><div className="chart-box" ref={lsChart.containerRef} /></div>
-        <div className="card card-sm"><div className="chart-box" ref={aqChart.containerRef} /></div>
-      </div>
+      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+        <Col xs={24} md={12}>
+          <Card size="small" title="记录粒度" className="ind-card">
+            <Flex align="center" gap={8}>
+              <InputNumber min={10} max={3600} step={10} value={saveInterval} onChange={(v) => setSaveInterval(v ?? 300)} style={{ width: 100 }} size="small" addonAfter="秒" />
+              <Button size="small" type="primary" icon={<SaveOutlined />} onClick={doSaveInterval}>保存</Button>
+              <Text type="secondary" style={{ fontSize: 12 }}>{(saveInterval / 60).toFixed(1)} 分钟/次</Text>
+            </Flex>
+          </Card>
+        </Col>
+        <Col xs={24} md={12}>
+          <Card size="small" title="数据导出" className="ind-card">
+            <Flex wrap align="center" gap={8}>
+              <Select value={exportStart || undefined} onChange={setExportStart} options={dateOpts} style={{ width: 130 }} size="small" placeholder="起始" />
+              <Text type="secondary">至</Text>
+              <Select value={exportEnd || undefined} onChange={setExportEnd} options={dateOpts} style={{ width: 130 }} size="small" placeholder="结束" />
+              <Button size="small" type="primary" icon={<DownloadOutlined />} onClick={exportCSV}>导出</Button>
+            </Flex>
+          </Card>
+        </Col>
+      </Row>
 
-      {/* History stats */}
-      {showStats && histData && (
-        <div className="card mb-6">
-          <h3 className="text-sm font-bold text-gray-600 mb-3">当日统计摘要</h3>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-center">
-              <thead>
-                <tr className="bg-slate-50 text-gray-500 text-xs">
-                  <th className="px-3 py-2 text-left font-semibold">指标</th>
-                  <th className="px-3 py-2 font-semibold">最小</th>
-                  <th className="px-3 py-2 font-semibold">最大</th>
-                  <th className="px-3 py-2 font-semibold">平均</th>
-                  <th className="px-3 py-2 font-semibold">数据点</th>
-                </tr>
-              </thead>
-              <tbody>
-                {STATS.map((m) => {
-                  const arr = histData[m.key as keyof HistoryApiData] as number[];
-                  const s = calcStats(arr);
-                  if (!s) return null;
-                  return (
-                    <tr key={m.key} className="border-b border-slate-100">
-                      <td className="px-3 py-2 text-left text-xs font-medium text-gray-700">{m.label}</td>
-                      <td className="px-3 py-2 text-blue-600 font-mono text-xs">{s.min.toFixed(m.dec)}</td>
-                      <td className="px-3 py-2 text-red-500 font-mono text-xs">{s.max.toFixed(m.dec)}</td>
-                      <td className="px-3 py-2 text-gray-600 font-mono text-xs">{s.avg.toFixed(m.dec)}</td>
-                      <td className="px-3 py-2 font-mono text-xs">{arr.length}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Log viewer */}
-      {showLog && (
-        <div className="card">
-          <h3 className="text-sm font-bold text-gray-600 mb-3">操作日志</h3>
-          <div className="bg-slate-50 rounded-lg p-4 max-h-80 overflow-y-auto text-xs font-mono text-gray-700 space-y-1">
-            {logEntries.length === 0 ? (
-              <div className="text-gray-400">当日无记录</div>
-            ) : (
-              logEntries.map((entry, i) => (
-                <div key={i} className="py-1 border-b border-slate-200">
-                  {entry}
+      {showCharts && histData && (
+        <>
+          <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+            <Col xs={24} lg={8}>
+              <Card size="small" title={`🌡️ ${fmtDate(selectedDate)} 温湿度`} className="ind-card">
+                <div className="chart-container">
+                  <Line data={toChartData(histData.time, [{ data: histData.temp, label: '温度(°C)' }, { data: histData.hum, label: '湿度(%)' }])} {...lineConfig(['#ef4444', '#0ea5e9'])} />
                 </div>
-              ))
-            )}
-          </div>
-        </div>
+              </Card>
+            </Col>
+            <Col xs={24} lg={8}>
+              <Card size="small" title={`☀️ ${fmtDate(selectedDate)} 光照·土壤`} className="ind-card">
+                <div className="chart-container">
+                  <Line data={toChartData(histData.time, [{ data: histData.lux, label: '光照(lx)' }, { data: histData.soil, label: '土壤(%)' }])} {...lineConfig(['#f59e0b', '#22c55e'])} />
+                </div>
+              </Card>
+            </Col>
+            <Col xs={24} lg={8}>
+              <Card size="small" title={`☁️ ${fmtDate(selectedDate)} 空气质量`} className="ind-card">
+                <div className="chart-container">
+                  <Line data={toChartData(histData.time, [{ data: histData.eco2, label: 'eCO2(ppm)' }, { data: histData.tvoc, label: 'TVOC(ppb)' }])} {...lineConfig(['#06b6d4', '#8b5cf6'])} />
+                </div>
+              </Card>
+            </Col>
+          </Row>
+          <Card size="small" title="📊 当日统计摘要" className="ind-card" style={{ marginBottom: 16 }}>
+            <Table className="ind-table" dataSource={statsData as any[]} columns={statsColumns} size="small" pagination={false} scroll={{ x: 400 }} />
+          </Card>
+        </>
       )}
-    </div>
+
+      {showLog && (
+        <Card size="small" title={`${fmtDate(selectedDate)} 操作日志`}>
+          <List
+            size="small"
+            bordered
+            dataSource={logEntries.length > 0 ? logEntries : ['当日无记录']}
+            style={{ maxHeight: 400, overflow: 'auto' }}
+            renderItem={(item) => (
+              <List.Item style={{ padding: '6px 12px', fontFamily: 'monospace', fontSize: 12 }}>{item}</List.Item>
+            )}
+          />
+        </Card>
+      )}
+    </>
   );
 }

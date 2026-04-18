@@ -1,5 +1,9 @@
 import { useState, useEffect } from 'react';
+import { Card, Row, Col, Input, Button, Badge, Progress, Tag, Typography, Flex, Descriptions, App } from 'antd';
+import { SaveOutlined, WifiOutlined, ClockCircleOutlined } from '@ant-design/icons';
 import { useApp } from '../context/AppContext';
+
+const { Title, Text, Link: ALink } = Typography;
 
 function fmtUptime(s: number): string {
   const d = Math.floor(s / 86400);
@@ -11,14 +15,22 @@ function fmtUptime(s: number): string {
   return `${m}分 ${sec}秒`;
 }
 
-function rssiQuality(rssi: number): { text: string; color: string } {
-  if (rssi >= -50) return { text: '极好', color: '#16a34a' };
-  if (rssi >= -70) return { text: '良好', color: '#2563eb' };
-  if (rssi >= -80) return { text: '一般', color: '#d97706' };
-  return { text: '较差', color: '#dc2626' };
+function rssiTag(rssi: number) {
+  if (rssi >= -50) return <Tag color="success">极好</Tag>;
+  if (rssi >= -70) return <Tag color="processing">良好</Tag>;
+  if (rssi >= -80) return <Tag color="warning">一般</Tag>;
+  return <Tag color="error">较差</Tag>;
 }
 
+const SENSOR_ITEMS = [
+  { id: 'sht40' as const, label: 'SHT40 温湿度' },
+  { id: 'bh1750' as const, label: 'BH1750 光照' },
+  { id: 'sgp30' as const, label: 'SGP30 空气' },
+  { id: 'soil' as const, label: 'ADC 土壤' },
+];
+
 export default function System() {
+  const { message: msg } = App.useApp();
   const { state } = useApp();
   const sys = state.system;
   const sensors = state.sensors;
@@ -34,116 +46,100 @@ export default function System() {
   }, []);
 
   const saveAIConfig = async () => {
-    if (!apiKey) { alert('请输入 API Key'); return; }
+    if (!apiKey) { msg.warning('请输入 API Key'); return; }
     try {
       await fetch('/api/ai/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ apiKey }),
       });
-      alert('AI API Key 已保存');
+      msg.success('AI API Key 已保存');
       setAiConfigured(true);
       setApiKey('');
-    } catch (e) { alert('保存失败: ' + (e as Error).message); }
+    } catch (e) { msg.error('保存失败: ' + (e as Error).message); }
   };
 
-  const heap = sys && sys.heap_total && sys.heap_free
-    ? ((sys.heap_total - sys.heap_free) / sys.heap_total * 100).toFixed(1)
+  const heapPct = sys && sys.heap_total && sys.heap_free
+    ? +((sys.heap_total - sys.heap_free) / sys.heap_total * 100).toFixed(1)
     : null;
 
-  const rq = sys?.rssi ? rssiQuality(sys.rssi) : null;
-
-  const sensorItems: { id: keyof typeof sensors; label: string }[] = [
-    { id: 'sht40', label: 'SHT40 温湿度' },
-    { id: 'bh1750', label: 'BH1750 光照' },
-    { id: 'sgp30', label: 'SGP30 空气' },
-    { id: 'soil', label: 'ADC 土壤' },
-  ];
-
   return (
-    <div>
-      <h1 className="text-xl font-bold text-gray-800 mb-5">系统信息</h1>
+    <>
+      <div className="page-header">
+        <Title level={4} style={{ margin: 0, color: '#1e293b', fontWeight: 700, letterSpacing: 0.5 }}>⚙️ 系统信息</Title>
+      </div>
 
       {/* Sensor status */}
-      <div className="card mb-6">
-        <h3 className="text-sm font-bold text-gray-600 mb-3">传感器状态</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {sensorItems.map((s) => (
-            <div key={s.id} className="flex items-center gap-2 bg-slate-50 rounded-lg p-3">
-              <span className={`conn-dot ${sensors[s.id] ? 'on' : 'off'}`} />
-              <span className="text-sm text-gray-600">{s.label}</span>
-            </div>
+      <Card size="small" title="📡 传感器状态" className="ind-card" style={{ marginBottom: 16, boxShadow: '0 2px 8px rgba(0,0,0,0.04)' }}>
+        <Row gutter={[12, 12]}>
+          {SENSOR_ITEMS.map((s) => (
+            <Col xs={12} md={6} key={s.id}>
+              <Flex align="center" gap={8}>
+                <span style={{ fontSize: 14 }}>{sensors[s.id] ? '✅' : '❌'}</span>
+                <Text style={{ fontSize: 13 }}>{s.label}</Text>
+              </Flex>
+            </Col>
           ))}
-        </div>
-      </div>
+        </Row>
+      </Card>
 
-      {/* System info cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        <div className="card card-sm">
-          <div className="text-xs text-gray-400 mb-1">系统时间</div>
-          <div className="text-lg font-bold text-gray-800">{state.time || '--'}</div>
-        </div>
-        <div className="card card-sm">
-          <div className="text-xs text-gray-400 mb-1">内存使用</div>
-          <div className="text-lg font-bold text-gray-800">{heap != null ? `${heap} %` : '-- %'}</div>
-        </div>
-        <div className="card card-sm">
-          <div className="text-xs text-gray-400 mb-1">WiFi 信号</div>
-          <div className="text-lg font-bold text-gray-800">
-            {sys?.rssi != null ? `${sys.rssi} dBm` : '--'}{' '}
-            {rq && <span className="text-sm font-normal" style={{ color: rq.color }}>{rq.text}</span>}
-          </div>
-        </div>
-        <div className="card card-sm">
-          <div className="text-xs text-gray-400 mb-1">运行时间</div>
-          <div className="text-lg font-bold text-gray-800">{sys?.uptime != null ? fmtUptime(sys.uptime) : '--'}</div>
-        </div>
-        <div className="card card-sm">
-          <div className="text-xs text-gray-400 mb-1">芯片信息</div>
-          <div className="text-sm font-bold text-gray-800">
-            {sys ? `Rev ${sys.chip_rev} · ${sys.cpu_cores}核 · ${sys.cpu_freq}MHz` : '--'}
-          </div>
-        </div>
-        <div className="card card-sm">
-          <div className="text-xs text-gray-400 mb-1">网络</div>
-          <div className="text-sm font-bold text-gray-800">{sys?.ip || '--'}</div>
-          <div className="text-xs text-gray-400 mt-1">{sys?.mac || '--'}</div>
-        </div>
-        <div className="card card-sm">
-          <div className="text-xs text-gray-400 mb-1">SDK 版本</div>
-          <div className="text-sm font-bold text-gray-800">{sys?.sdk_ver || '--'}</div>
-        </div>
-      </div>
+      {/* System info */}
+      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+        <Col xs={24} lg={12}>
+          <Card size="small" title={<><ClockCircleOutlined /> 💻 基本信息</>} className="ind-card" style={{ boxShadow: '0 2px 8px rgba(0,0,0,0.04)' }}>
+            <Descriptions column={1} size="small" labelStyle={{ width: 90 }}>
+              <Descriptions.Item label="系统时间">{state.time || '--'}</Descriptions.Item>
+              <Descriptions.Item label="运行时间">{sys?.uptime != null ? fmtUptime(sys.uptime) : '--'}</Descriptions.Item>
+              <Descriptions.Item label="SDK 版本">{sys?.sdk_ver || '--'}</Descriptions.Item>
+              <Descriptions.Item label="芯片信息">
+                {sys ? `Rev ${sys.chip_rev} · ${sys.cpu_cores}核 · ${sys.cpu_freq}MHz` : '--'}
+              </Descriptions.Item>
+            </Descriptions>
+          </Card>
+        </Col>
+        <Col xs={24} lg={12}>
+          <Card size="small" title={<><WifiOutlined /> 🌐 网络 & 内存</>} className="ind-card" style={{ boxShadow: '0 2px 8px rgba(0,0,0,0.04)' }}>
+            <Descriptions column={1} size="small" labelStyle={{ width: 90 }}>
+              <Descriptions.Item label="IP 地址">{sys?.ip || '--'}</Descriptions.Item>
+              <Descriptions.Item label="MAC">{sys?.mac || '--'}</Descriptions.Item>
+              <Descriptions.Item label="WiFi 信号">
+                {sys?.rssi != null ? <>{sys.rssi} dBm {rssiTag(sys.rssi)}</> : '--'}
+              </Descriptions.Item>
+              <Descriptions.Item label="内存使用">
+                {heapPct != null ? (
+                  <Progress percent={heapPct} size="small" status={heapPct > 85 ? 'exception' : 'normal'} style={{ maxWidth: 200 }} />
+                ) : '--'}
+              </Descriptions.Item>
+            </Descriptions>
+          </Card>
+        </Col>
+      </Row>
 
       {/* AI config */}
-      <div className="card mt-6">
-        <div className="flex items-center gap-3 mb-3">
-          <span className="text-xl">🧠</span>
+      <Card style={{ marginBottom: 16, boxShadow: '0 2px 8px rgba(0,0,0,0.04)', borderLeft: '3px solid #475569' }}>
+        <Flex align="center" gap={10} style={{ marginBottom: 16 }}>
+          <span style={{ fontSize: 18 }}>🧠</span>
           <div>
-            <h3 className="font-bold text-gray-800 text-sm">AI 大模型配置</h3>
-            <span className="text-xs" style={{ color: aiConfigured ? '#16a34a' : '#9ca3af' }}>
-              {aiConfigured ? '已配置' : '未配置'}
-            </span>
+            <Text strong style={{ fontSize: 14 }}>AI 大模型配置</Text>
+            <br />
+            <Badge status={aiConfigured ? 'success' : 'default'} text={aiConfigured ? '已配置' : '未配置'} />
           </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <input
-            type="password"
+        </Flex>
+        <Flex wrap gap={8} align="center">
+          <Input.Password
             placeholder="MiniMax API Key"
-            className="flex-1 min-w-[200px] px-3 py-2 text-sm rounded-lg border focus:ring-2 focus:ring-blue-400 outline-none"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
+            style={{ maxWidth: 340, flex: 1 }}
           />
-          <button onClick={saveAIConfig} className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">保存</button>
-        </div>
-        <p className="text-xs text-gray-400 mt-2">
+          <Button type="primary" icon={<SaveOutlined />} onClick={saveAIConfig}>保存</Button>
+        </Flex>
+        <Text type="secondary" style={{ fontSize: 12, marginTop: 8, display: 'block' }}>
           使用 MiniMax-M2.7 模型，请在{' '}
-          <a href="https://platform.minimaxi.com" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline">
-            platform.minimaxi.com
-          </a>{' '}
+          <ALink href="https://platform.minimaxi.com" target="_blank">platform.minimaxi.com</ALink>{' '}
           获取 API Key
-        </p>
-      </div>
-    </div>
+        </Text>
+      </Card>
+    </>
   );
 }

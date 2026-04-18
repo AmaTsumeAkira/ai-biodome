@@ -1,5 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { FloatButton, Drawer, Input, Button, Flex, Typography, Space } from 'antd';
+import { CommentOutlined, ExperimentOutlined, SendOutlined, CloseOutlined } from '@ant-design/icons';
 import { useApp } from '../context/AppContext';
+
+const { Text } = Typography;
 
 export default function AIChat() {
   const { wsSend, chatMessages, addChat } = useApp();
@@ -8,12 +12,10 @@ export default function AIChat() {
   const [analyzing, setAnalyzing] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
 
-  // Scroll to bottom when new messages
   useEffect(() => {
     if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
   }, [chatMessages]);
 
-  // Reset analyzing state when AI response comes
   useEffect(() => {
     if (analyzing && chatMessages.length > 0 && chatMessages[chatMessages.length - 1].role === 'ai') {
       setAnalyzing(false);
@@ -34,66 +36,81 @@ export default function AIChat() {
     setInput('');
   }, [input, wsSend, addChat]);
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') sendChat();
-  };
-
   return (
     <>
-      {/* Floating button */}
-      <button className="ai-float-btn" onClick={() => setOpen(!open)}>💬</button>
+      <FloatButton
+        icon={<CommentOutlined />}
+        type="primary"
+        tooltip="🧠 AI 智能助手"
+        onClick={() => setOpen(true)}
+        style={{ insetInlineEnd: 24, insetBlockEnd: 80 }}
+      />
 
-      {/* Drawer */}
-      <div className={`ai-drawer ${open ? 'open' : ''}`}>
-        <div className="ai-drawer-head">
-          <div className="flex items-center gap-2">
-            <span className="text-lg">🧠</span>
-            <span className="font-bold text-sm">AI 智能助手</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={askAnalyze}
-              disabled={analyzing}
-              className={`px-3 py-1 bg-white/20 hover:bg-white/30 rounded-lg text-xs font-medium transition-colors ${analyzing ? 'opacity-50 cursor-not-allowed' : ''}`}
+      <Drawer
+        title={
+          <Flex align="center" gap={8}>
+            <span style={{ fontSize: 18 }}>🧠</span>
+            <Text strong>AI 智能助手</Text>
+          </Flex>
+        }
+        placement="right"
+        width={360}
+        open={open}
+        onClose={() => setOpen(false)}
+        closeIcon={<CloseOutlined />}
+        extra={
+          <Button
+            size="small"
+            type="primary"
+            icon={<ExperimentOutlined />}
+            loading={analyzing}
+            onClick={askAnalyze}
+          >
+            环境分析
+          </Button>
+        }
+        styles={{ body: { padding: 0, display: 'flex', flexDirection: 'column' } }}
+      >
+        {/* Message area */}
+        <div ref={bodyRef} style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+          {chatMessages.length === 0 && (
+            <Text type="secondary" style={{ display: 'block', textAlign: 'center', marginTop: 40 }}>
+              向 AI 提问，或点击"环境分析"
+            </Text>
+          )}
+          {chatMessages.map((m, i) => (
+            <div
+              key={i}
+              style={{
+                display: 'flex',
+                justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start',
+                marginBottom: 12,
+                paddingLeft: m.role === 'user' ? 40 : 0,
+                paddingRight: m.role === 'user' ? 0 : 40,
+              }}
             >
-              {analyzing ? '分析中...' : '环境分析'}
-            </button>
-            <button
-              onClick={() => setOpen(false)}
-              className="text-white/80 hover:text-white text-lg"
-              style={{ background: 'none', border: 'none', cursor: 'pointer' }}
-            >✕</button>
-          </div>
-        </div>
-
-        <div className="ai-drawer-body" ref={bodyRef}>
-          {chatMessages.map((msg, i) => (
-            <div key={i} className={msg.role === 'user' ? 'flex justify-end pr-2 pl-8 mb-3' : 'flex justify-start pl-2 pr-8 mb-3'}>
-              <div className={
-                msg.role === 'user'
-                  ? 'bg-blue-600 text-white p-3 rounded-2xl rounded-tr-none text-sm break-words'
-                  : 'bg-gray-50 border border-gray-100 p-3 rounded-2xl rounded-tl-none text-sm text-gray-700 leading-relaxed break-words whitespace-pre-wrap'
-              }>
-                {msg.text}
+              <div
+                className={m.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-ai'}
+              >
+                {m.text}
               </div>
             </div>
           ))}
         </div>
 
-        <div className="ai-drawer-foot">
-          <input
-            type="text"
-            placeholder="输入你的问题..."
-            className="flex-1 px-3 py-2 text-sm rounded-lg border focus:ring-2 focus:ring-blue-400 outline-none"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-          />
-          <button onClick={sendChat} className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">
-            发送
-          </button>
+        {/* Input area */}
+        <div style={{ padding: '12px 16px', borderTop: '1px solid #f0f0f0' }}>
+          <Space.Compact style={{ width: '100%' }}>
+            <Input
+              placeholder="输入你的问题..."
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onPressEnter={sendChat}
+            />
+            <Button type="primary" icon={<SendOutlined />} onClick={sendChat}>发送</Button>
+          </Space.Compact>
         </div>
-      </div>
+      </Drawer>
     </>
   );
 }

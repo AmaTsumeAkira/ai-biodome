@@ -1,4 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
+import { Card, Row, Col, Input, Switch, Button, Badge, Tag, Typography, Flex, App } from 'antd';
+import { SaveOutlined, SendOutlined } from '@ant-design/icons';
+
+const { Title, Text } = Typography;
 
 interface QQBotState {
   appId: string;
@@ -17,14 +21,15 @@ const COMMANDS = [
 ];
 
 export default function QQBot() {
+  const { message: msg } = App.useApp();
   const [cfg, setCfg] = useState<QQBotState>({
     appId: '', appSecret: '', userOpenId: '', enabled: false,
     tokenValid: false, gatewayConnected: false, gatewayReady: false,
   });
   const [statusText, setStatusText] = useState('未配置');
-  const [statusColor, setStatusColor] = useState('#9ca3af');
+  const [statusColor, setStatusColor] = useState<'default' | 'success' | 'processing' | 'warning' | 'error'>('default');
   const [gwText, setGwText] = useState('未启用');
-  const [gwColor, setGwColor] = useState('#9ca3af');
+  const [gwColor, setGwColor] = useState('#d9d9d9');
 
   const loadConfig = useCallback(async () => {
     try {
@@ -40,22 +45,22 @@ export default function QQBot() {
         gatewayReady: d.gatewayReady || false,
       }));
 
-      if (!d.appId) { setStatusText('未配置'); setStatusColor('#9ca3af'); }
-      else if (d.gatewayReady) { setStatusText('Gateway 就绪'); setStatusColor('#16a34a'); }
-      else if (d.tokenValid) { setStatusText('Token 有效'); setStatusColor('#2563eb'); }
-      else if (d.enabled) { setStatusText('已启用'); setStatusColor('#2563eb'); }
-      else { setStatusText('已禁用'); setStatusColor('#ea580c'); }
+      if (!d.appId) { setStatusText('未配置'); setStatusColor('default'); }
+      else if (d.gatewayReady) { setStatusText('Gateway 就绪'); setStatusColor('success'); }
+      else if (d.tokenValid) { setStatusText('Token 有效'); setStatusColor('processing'); }
+      else if (d.enabled) { setStatusText('已启用'); setStatusColor('processing'); }
+      else { setStatusText('已禁用'); setStatusColor('warning'); }
 
-      if (d.gatewayReady) { setGwText('已连接'); setGwColor('#22c55e'); }
-      else if (d.gatewayConnected) { setGwText('连接中...'); setGwColor('#f59e0b'); }
-      else if (d.enabled) { setGwText('未连接'); setGwColor('#ef4444'); }
-      else { setGwText('未启用'); setGwColor('#9ca3af'); }
+      if (d.gatewayReady) { setGwText('已连接'); setGwColor('#52c41a'); }
+      else if (d.gatewayConnected) { setGwText('连接中...'); setGwColor('#faad14'); }
+      else if (d.enabled) { setGwText('未连接'); setGwColor('#ff4d4f'); }
+      else { setGwText('未启用'); setGwColor('#d9d9d9'); }
     } catch { /* ignore */ }
   }, []);
 
   useEffect(() => {
     loadConfig();
-    const timer = window.setInterval(loadConfig, 15000);
+    const timer = setInterval(loadConfig, 15000);
     return () => clearInterval(timer);
   }, [loadConfig]);
 
@@ -74,102 +79,101 @@ export default function QQBot() {
         body: JSON.stringify(body),
       });
       const d = await res.json();
-      if (d.ok) { alert('配置已保存'); loadConfig(); }
-    } catch (e) { alert('保存失败: ' + (e as Error).message); }
-  }, [cfg, loadConfig]);
+      if (d.ok) { msg.success('配置已保存'); loadConfig(); }
+    } catch (e) { msg.error('保存失败: ' + (e as Error).message); }
+  }, [cfg, loadConfig, msg]);
 
   const testBot = async () => {
     try {
       const res = await fetch('/api/qqbot/test');
       const d = await res.json();
-      alert(d.ok ? '测试消息发送成功！' : '失败: ' + (d.error || '未知错误'));
-    } catch (e) { alert('请求失败: ' + (e as Error).message); }
+      if (d.ok) msg.success('测试消息发送成功');
+      else msg.error('失败: ' + (d.error || '未知错误'));
+    } catch (e) { msg.error('请求失败: ' + (e as Error).message); }
   };
 
   return (
-    <div>
-      <h1 className="text-xl font-bold text-gray-800 mb-5">QQ 机器人</h1>
+    <>
+      <div className="page-header">
+        <Title level={4} style={{ margin: 0, color: '#1e293b', fontWeight: 700, letterSpacing: 0.5 }}>🤖 QQ 机器人</Title>
+      </div>
 
-      <div className="card mb-6">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <span className="text-2xl">🤖</span>
+      <Card style={{ marginBottom: 20, boxShadow: '0 2px 8px rgba(0,0,0,0.04)' }}>
+        <Flex justify="space-between" align="start" style={{ marginBottom: 16 }}>
+          <Flex align="center" gap={10}>
+            <span style={{ fontSize: 18 }}>🤖</span>
             <div>
-              <h3 className="font-bold text-gray-800">机器人配置</h3>
-              <span className="text-xs font-medium" style={{ color: statusColor }}>{statusText}</span>
+              <Text strong style={{ fontSize: 14 }}>机器人配置</Text>
+              <br />
+              <Badge status={statusColor} text={statusText} />
             </div>
-          </div>
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input
-              type="checkbox"
-              className="sr-only peer"
-              checked={cfg.enabled}
-              onChange={(e) => { const v = e.target.checked; setCfg({ ...cfg, enabled: v }); saveConfig({ enabled: v }); }}
-            />
-            <div className="w-12 h-6 bg-gray-300 rounded-full peer peer-checked:bg-blue-500 peer-checked:after:translate-x-6 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all after:shadow" />
-          </label>
-        </div>
+          </Flex>
+          <Switch
+            checked={cfg.enabled}
+            onChange={(v) => { setCfg({ ...cfg, enabled: v }); saveConfig({ enabled: v }); }}
+            checkedChildren="启用"
+            unCheckedChildren="禁用"
+          />
+        </Flex>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-          <div>
-            <label className="block text-xs font-semibold text-gray-500 mb-1">AppID</label>
-            <input
-              type="text"
+        <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+          <Col xs={24} md={8}>
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>AppID</Text>
+            <Input
               placeholder="QQ Bot AppID"
-              className="w-full px-3 py-2 text-sm rounded-lg border focus:ring-2 focus:ring-blue-400 outline-none"
               value={cfg.appId}
               onChange={(e) => setCfg({ ...cfg, appId: e.target.value })}
             />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-gray-500 mb-1">AppSecret</label>
-            <input
-              type="password"
-              placeholder="AppSecret"
-              className="w-full px-3 py-2 text-sm rounded-lg border focus:ring-2 focus:ring-blue-400 outline-none"
+          </Col>
+          <Col xs={24} md={8}>
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>AppSecret</Text>
+            <Input.Password
+              placeholder="不修改则留空"
               value={cfg.appSecret}
               onChange={(e) => setCfg({ ...cfg, appSecret: e.target.value })}
             />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-gray-500 mb-1">用户 OpenID（可选）</label>
-            <input
-              type="text"
-              placeholder="主动推送用"
-              className="w-full px-3 py-2 text-sm rounded-lg border focus:ring-2 focus:ring-blue-400 outline-none"
+          </Col>
+          <Col xs={24} md={8}>
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>用户 OpenID（可选）</Text>
+            <Input
+              placeholder="主动推送用，可自动获取"
               value={cfg.userOpenId}
               onChange={(e) => setCfg({ ...cfg, userOpenId: e.target.value })}
             />
-          </div>
-        </div>
+          </Col>
+        </Row>
 
-        <div className="flex flex-wrap items-center gap-3">
-          <button onClick={() => saveConfig()} className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">保存配置</button>
-          <button onClick={testBot} className="px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded-lg text-sm font-medium transition-colors">发送测试</button>
-        </div>
-      </div>
+        <Flex gap={12}>
+          <Button type="primary" icon={<SaveOutlined />} onClick={() => saveConfig()}>保存配置</Button>
+          <Button icon={<SendOutlined />} onClick={testBot}>发送测试</Button>
+        </Flex>
+      </Card>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="card">
-          <h3 className="text-sm font-bold text-gray-600 mb-3">Gateway 状态</h3>
-          <div className="flex items-center gap-3 mb-3">
-            <span className="w-3 h-3 rounded-full" style={{ background: gwColor }} />
-            <span className="text-sm font-medium">{gwText}</span>
-          </div>
-          <p className="text-xs text-gray-400">Gateway 连接后，用户可私聊机器人查询大棚状态</p>
-        </div>
-        <div className="card">
-          <h3 className="text-sm font-bold text-gray-600 mb-3">支持的指令</h3>
-          <div className="space-y-2">
-            {COMMANDS.map((c) => (
-              <div key={c.cmd} className="flex items-center gap-2 text-sm">
-                <code className="bg-slate-100 px-2 py-0.5 rounded text-blue-600 font-mono text-xs">{c.cmd}</code>
-                <span className="text-gray-600">{c.desc}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
+      <Row gutter={[16, 16]}>
+        <Col xs={24} md={12}>
+          <Card size="small" title="🛠️ Gateway 状态" className="ind-card" style={{ boxShadow: '0 2px 8px rgba(0,0,0,0.04)' }}>
+            <Flex align="center" gap={12} style={{ marginBottom: 12 }}>
+              <Badge color={gwColor} />
+              <Text strong>{gwText}</Text>
+            </Flex>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              Gateway 连接后，用户可私聊机器人查询大棚状态
+            </Text>
+          </Card>
+        </Col>
+        <Col xs={24} md={12}>
+          <Card size="small" title="📝 支持的指令" className="ind-card" style={{ boxShadow: '0 2px 8px rgba(0,0,0,0.04)' }}>
+            <Flex vertical gap={8}>
+              {COMMANDS.map((c) => (
+                <Flex key={c.cmd} align="center" gap={8}>
+                  <Tag color="blue" style={{ margin: 0, fontFamily: 'monospace' }}>{c.cmd}</Tag>
+                  <Text type="secondary">{c.desc}</Text>
+                </Flex>
+              ))}
+            </Flex>
+          </Card>
+        </Col>
+      </Row>
+    </>
   );
 }
